@@ -1,0 +1,14 @@
+.venv/
+.env
+google_credentials.json
+__pycache__/
+*.py[cod]
+browser_data/*
+!browser_data/.gitkeep
+.claude/skills/gmail/gmail_token.json
+.claude/skills/calendar/calendar_token.json
+documents/*
+speech/stt/whisper/*.bin
+speech/stt/whisper/*.exe
+speech/stt/whisper/*.dll
+speech/stt/whisper/whisper-server
