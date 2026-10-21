@@ -1,0 +1,10 @@
+-r requirements.txt
+
+argon2-cffi==25.1.0
+insightface==0.7.3
+onnxruntime==1.24.1
+opencv-python==4.13.0.92
+PySide6==6.10.2
+qasync==0.28.0
+silero-vad==6.2.0
+torch==2.10.0

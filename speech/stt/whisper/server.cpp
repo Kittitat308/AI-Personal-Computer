@@ -863,6 +863,15 @@ int main(int argc, char ** argv) {
         res.set_content("{\"status\":\"cancelling\"}", "application/json");
     });
 
+    auto * server_instance = svr.get();
+    svr->Post(sparams.request_path + "/shutdown", [server_instance](const Request &, Response &res){
+        res.set_content("{\"status\":\"shutting_down\"}", "application/json");
+        std::thread([server_instance] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            server_instance->stop();
+        }).detach();
+    });
+
     svr->Post(sparams.request_path + sparams.inference_path, [&](const Request &req, Response &res){
         // acquire whisper model mutex lock
         std::lock_guard<std::mutex> lock(whisper_mutex);
