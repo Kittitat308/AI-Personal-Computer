@@ -102,7 +102,7 @@ class DesktopApplication:
         self.recovery_timer.timeout.connect(self._schedule_recovery_scan)
 
         self.bridge.utterance.connect(self._on_utterance)
-        self.bridge.voice_error.connect(self._show_error)
+        self.bridge.voice_error.connect(self._on_voice_error)
         self.bridge.push_to_talk_pressed.connect(self._on_push_to_talk_pressed)
         self.bridge.push_to_talk_released.connect(self._on_push_to_talk_released)
         self.bridge.stop_requested.connect(self.stop_current_operation)
@@ -1513,6 +1513,16 @@ class DesktopApplication:
             self._show_notice("เกิดข้อผิดพลาด", message, error=True)
         else:
             self.window.login.status.setText(message)
+
+    def _on_voice_error(self, message: str) -> None:
+        if not HardwareManager.microphone_available():
+            print(f"MICROPHONE DISABLED: {message}")
+            self.state.microphone_available = False
+            self.state.microphone_enabled = False
+            self.window.chat.set_mic_enabled(False)
+            self._refresh_settings()
+            return
+        self._show_error(message)
 
     def _show_notice(self, title: str, message: str, error: bool = False) -> None:
         dialog = NoticeDialog(title, message, self.window, error=error)
