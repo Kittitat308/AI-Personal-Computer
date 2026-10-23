@@ -109,7 +109,14 @@ class ChatAI:
                 + prompt
             )
 
-        response = await self.session.generate(prompt)
+        try:
+            response = await self.session.generate(prompt)
+        except asyncio.CancelledError:
+            session = self.session
+            self.session = None
+            if session is not None:
+                await session.abort()
+            raise
         chat_result = self._parse_result(response.structured_output, response.text)
         self.history.append(
             ConversationTurn(user=user_message.strip(), assistant=chat_result.response)
@@ -149,6 +156,13 @@ class ChatAI:
         self.turn_count = 0
         await self.start()
         return True
+
+    async def reset(self, start: bool = True) -> None:
+        await self.close()
+        self.history.clear()
+        self.turn_count = 0
+        if start:
+            await self.start()
 
     async def close(self) -> None:
         if self.session is not None:

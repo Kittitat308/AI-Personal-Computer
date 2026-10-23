@@ -31,6 +31,16 @@ description: Search for videos or channels through the YouTube Data API and open
 - Do not invent search results, IDs, titles, channel names, or publication
   times. Base the result only on tool output.
 
+## Response
+
+- After successfully opening a channel or video, respond with exactly one
+  short spoken sentence that states only what was opened.
+- Do not include search-result details, descriptions, subscriber counts, view
+  counts, publication information, selection reasoning, alternative results,
+  or optional follow-up offers.
+- If the requested action fails or requires clarification, state only the
+  useful reason or ask one concise question.
+
 ## Available tools
 
 - `search_youtube`

@@ -1,5 +1,6 @@
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,32 @@ from speech.stt.config import CANCEL_REQUEST_TIMEOUT_SECONDS, SAMPLE_RATE
 
 class GUISTTService(STTService):
     """Adds waveform transcription without changing the existing STT service."""
+
+    _NO_SPEECH_TRANSCRIPTS = {
+        "ขอโทษค่ะคุณพูดว่าอะไรนะ",
+        "ขอโทษค่ะคุณพูดว่าอะไรนะคะ",
+        "ขอโทษค่ะคุณพูว่าอะไรนะ",
+        "ขอโทษค่ะคุณพูว่าอะไรนะคะ",
+        "ขอโทษครับคุณพูดว่าอะไรนะ",
+        "ขอโทษครับคุณพูดว่าอะไรนะครับ",
+    }
+
+    @staticmethod
+    def _normalized_transcript(text: str) -> str:
+        return "".join(
+            character
+            for character in text.casefold()
+            if not character.isspace()
+            and unicodedata.category(character)[0] not in {"P", "S"}
+        )
+
+    @classmethod
+    def _is_no_speech_transcript(cls, text: str) -> bool:
+        normalized = cls._normalized_transcript(text)
+        return normalized in {
+            cls._normalized_transcript(phrase)
+            for phrase in cls._NO_SPEECH_TRANSCRIPTS
+        }
 
     def transcribe_audio(self, audio: np.ndarray) -> str:
         samples = np.asarray(audio, dtype=np.float32).reshape(-1)
@@ -26,7 +53,8 @@ class GUISTTService(STTService):
         audio_path = Path(temporary.name)
         sf.write(audio_path, samples, SAMPLE_RATE, subtype="PCM_16")
         try:
-            return self._transcribe(audio_path)
+            text = self._transcribe(audio_path)
+            return "" if self._is_no_speech_transcript(text) else text
         finally:
             audio_path.unlink(missing_ok=True)
 

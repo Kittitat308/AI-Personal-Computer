@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 from core.claude_cli import ClaudeSession
@@ -51,6 +52,7 @@ class WorkerAI:
         self.model = model
         self.system_prompt = (PROMPTS_DIR / "worker.md").read_text(encoding="utf-8")
         self.active_session = None
+        self.running_session = None
 
     @property
     def awaiting_user_input(self) -> bool:
@@ -188,6 +190,26 @@ class WorkerAI:
         if slash_commands:
             prompt = " ".join(slash_commands) + "\n\n" + prompt
 
+        working_directories = {
+            definition.working_directory.resolve()
+            for definition in definitions
+            if definition.working_directory is not None
+        }
+        if len(working_directories) == 1:
+            working_directory = next(iter(working_directories))
+            prompt += (
+                "\n\nFile workspace boundary:\n"
+                f"- Use {working_directory} as the working directory.\n"
+                "- Create every generated or temporary file inside this directory.\n"
+                "- Do not create files in the project root or another directory.\n"
+                "- A user-selected additional directory may be read only when the task "
+                "requires an existing file from it; keep all outputs in the working directory.\n"
+                "- After completing the task, respond with only one short natural sentence "
+                "stating that the requested file was created or edited, including the "
+                "filename and subject when useful. Do not describe the document contents, "
+                "formatting, validation process, temporary files, or working directory."
+            )
+
         return prompt
 
     async def execute(self, task: TaskRequest) -> WorkerResult:
@@ -198,13 +220,20 @@ class WorkerAI:
         definitions = self.registry.resolve(task.skill_ids)
         await self.registry.start_runtimes(definitions)
         session = self._create_session(definitions, self.registry.mcp_servers(definitions))
+        self.running_session = session
 
         try:
             response = await session.generate(self._task_prompt(task, definitions))
             result = self._parse_result(response.structured_output, response.text)
+        except asyncio.CancelledError:
+            await session.abort()
+            raise
         except Exception:
             await session.close()
             raise
+        finally:
+            if self.running_session is session:
+                self.running_session = None
 
         if result.status == "needs_input":
             self.active_session = session
@@ -217,11 +246,21 @@ class WorkerAI:
         if self.active_session is None:
             raise RuntimeError("Worker is not waiting for user input")
 
-        response = await self.active_session.generate(
-            "The user answered your question:\n"
-            + user_message.strip()
-            + "\n\nContinue the same delegated task."
-        )
+        session = self.active_session
+        self.running_session = session
+        try:
+            response = await session.generate(
+                "The user answered your question:\n"
+                + user_message.strip()
+                + "\n\nContinue the same delegated task."
+            )
+        except asyncio.CancelledError:
+            self.active_session = None
+            await session.abort()
+            raise
+        finally:
+            if self.running_session is session:
+                self.running_session = None
         result = self._parse_result(response.structured_output, response.text)
 
         if result.status != "needs_input":
@@ -244,3 +283,17 @@ class WorkerAI:
             await self.active_session.close()
 
         self.active_session = None
+
+    async def abort(self) -> None:
+        sessions = {
+            session
+            for session in (self.running_session, self.active_session)
+            if session is not None
+        }
+        self.running_session = None
+        self.active_session = None
+        if sessions:
+            await asyncio.gather(
+                *(session.abort() for session in sessions),
+                return_exceptions=True,
+            )

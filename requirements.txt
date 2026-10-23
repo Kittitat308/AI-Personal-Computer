@@ -4,7 +4,9 @@ google-auth==2.56.0
 google-auth-oauthlib==1.5.0
 mcp==2.3.0
 numpy==2.4.6
+openwakeword==0.6.0
 playwright==1.64.0
+pynput==1.8.1
 pydantic==2.14.1
 python-dotenv==1.2.1
 requests==2.34.2

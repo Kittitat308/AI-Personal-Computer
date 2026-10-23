@@ -62,6 +62,16 @@ class Controller:
 
         return await self.chat.rotate_if_due()
 
+    async def reset_conversation(self, start: bool = True) -> None:
+        async with self.lock:
+            await self.worker.close()
+            await self.chat.reset(start=start)
+            self.pending_execution_result = None
+
+    async def cancel_pending_task(self) -> None:
+        await self.worker.abort()
+        self.pending_execution_result = None
+
     async def close(self) -> None:
         try:
             await self.worker.close()

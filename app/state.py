@@ -13,6 +13,7 @@ class RuntimeState:
     speaker_available: bool = False
     tts_enabled: bool = False
     assistant_busy: bool = False
+    voice_mode: str = "normal"
     allowed_folder: str | None = None
 
     @property

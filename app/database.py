@@ -17,7 +17,20 @@ class User:
     nickname: str
 
 
+@dataclass(frozen=True)
+class DeviceSettings:
+    user_id: int
+    microphone_enabled: bool
+    camera_enabled: bool
+    tts_enabled: bool
+
+
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9]+$")
+DEVICE_SETTING_COLUMNS = {
+    "microphone": "microphone_enabled",
+    "camera": "camera_enabled",
+    "tts": "tts_enabled",
+}
 
 
 class Database:
@@ -80,6 +93,21 @@ class Database:
                 "UPDATE users SET nickname = username WHERE TRIM(nickname) = ''"
             )
             self._migrate_username_to_case_sensitive(connection)
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS device_settings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL UNIQUE,
+                    microphone_enabled INTEGER NOT NULL DEFAULT 1 CHECK (microphone_enabled IN (0, 1)),
+                    camera_enabled INTEGER NOT NULL DEFAULT 1 CHECK (camera_enabled IN (0, 1)),
+                    tts_enabled INTEGER NOT NULL DEFAULT 1 CHECK (tts_enabled IN (0, 1)),
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+
+                INSERT OR IGNORE INTO device_settings(user_id)
+                SELECT id FROM users;
+                """
+            )
 
     @staticmethod
     def _migrate_username_to_case_sensitive(connection: sqlite3.Connection) -> None:
@@ -157,11 +185,9 @@ class Database:
     ) -> User:
         username = username.strip()
         nickname = nickname.strip()
-        self._validate_username(username)
-        if not nickname:
-            raise ValueError("กรุณากรอกชื่อเล่น")
-        if len(password) < 8:
-            raise ValueError("รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร")
+        validation_errors = self.validate_new_user(username, nickname, password)
+        if validation_errors:
+            raise ValueError(next(iter(validation_errors.values())))
 
         password_hash = self._hasher.hash(password)
         with self._lock, self._connection() as connection:
@@ -174,8 +200,49 @@ class Database:
                 raise ValueError("ชื่อผู้ใช้นี้มีอยู่แล้ว") from error
 
             user_id = int(cursor.lastrowid)
+            connection.execute(
+                "INSERT INTO device_settings(user_id) VALUES (?)",
+                (user_id,),
+            )
             self._replace_embeddings(connection, user_id, embeddings or [])
             return User(user_id, username, nickname)
+
+    def get_device_settings(self, user_id: int) -> DeviceSettings:
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO device_settings(user_id) VALUES (?)",
+                (user_id,),
+            )
+            row = connection.execute(
+                """
+                SELECT user_id, microphone_enabled, camera_enabled, tts_enabled
+                FROM device_settings
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("ไม่พบการตั้งค่าอุปกรณ์ของผู้ใช้")
+        return DeviceSettings(
+            user_id=int(row["user_id"]),
+            microphone_enabled=bool(row["microphone_enabled"]),
+            camera_enabled=bool(row["camera_enabled"]),
+            tts_enabled=bool(row["tts_enabled"]),
+        )
+
+    def update_device_setting(self, user_id: int, device: str, enabled: bool) -> None:
+        column = DEVICE_SETTING_COLUMNS.get(device)
+        if column is None:
+            raise ValueError("ชื่ออุปกรณ์ไม่ถูกต้อง")
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO device_settings(user_id) VALUES (?)",
+                (user_id,),
+            )
+            connection.execute(
+                f"UPDATE device_settings SET {column} = ? WHERE user_id = ?",
+                (int(enabled), user_id),
+            )
 
     def authenticate(self, username: str, password: str) -> User | None:
         with self._lock, self._connection() as connection:
@@ -277,6 +344,27 @@ class Database:
             raise ValueError(
                 "ชื่อผู้ใช้ใช้ได้เฉพาะตัวอักษรภาษาอังกฤษและตัวเลขเท่านั้น"
             )
+
+    @staticmethod
+    def validate_new_user(
+        username: str,
+        nickname: str,
+        password: str,
+    ) -> dict[str, str]:
+        errors: dict[str, str] = {}
+        username = username.strip()
+        nickname = nickname.strip()
+        if not username:
+            errors["username"] = "กรุณากรอกชื่อผู้ใช้"
+        elif USERNAME_PATTERN.fullmatch(username) is None:
+            errors["username"] = (
+                "ชื่อผู้ใช้ใช้ได้เฉพาะตัวอักษรภาษาอังกฤษและตัวเลขเท่านั้น"
+            )
+        if not nickname:
+            errors["nickname"] = "กรุณากรอกชื่อเล่น"
+        if len(password) < 8:
+            errors["password"] = "รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร"
+        return errors
 
     def change_password(self, user_id: int, current: str, new: str) -> None:
         if len(new) < 8:

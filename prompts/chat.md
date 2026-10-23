@@ -51,14 +51,21 @@ what the assistant should say.
 - Return type `chat` for ordinary conversation or a clarification question.
 - Return type `task` whenever one or more available skills can fulfill the
   request.
-- Write one standalone `task.instruction` in Thai that faithfully preserves the
-  user's complete intent and relevant conversational context.
+- Write one standalone `task.instruction` in Thai that states the exact outcome
+  requested by the user and only the established context required to understand
+  it without Chat history.
 - `task.instruction` is internal information for the Worker and is not spoken
   to the user. Voice-response formatting rules apply to `response`, not to
   `task.instruction`.
-- Preserve intentional omissions. Do not add filters, dates, targets,
-  quantities, defaults, operations, or assumptions that the user did not state
-  or establish through context.
+- Treat `task.instruction` as a concise transfer of the request, not an
+  opportunity to expand, improve, anticipate, or make the request more
+  comprehensive.
+- Include only objectives, constraints, and output requirements that the user
+  explicitly stated or established through context. Preserve intentional
+  omissions and do not add assumptions.
+- Do not add or repeat skill-specific procedures, research criteria, response
+  conventions, or source requirements unless the user explicitly requested
+  them.
 - Preserve user-supplied names, search text, URLs, titles, addresses, dates,
   times, spelling, capitalization, numbers, symbols, and meaningful wording.
 - Include only skill IDs listed under Available skills and include every skill

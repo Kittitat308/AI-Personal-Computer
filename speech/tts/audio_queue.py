@@ -1,5 +1,7 @@
 import asyncio
 
+import sounddevice as sd
+
 from speech.tts.tts import TTSService
 
 
@@ -28,6 +30,31 @@ class AudioQueue:
 
     async def wait_until_idle(self) -> None:
         await self._queue.join()
+
+    @staticmethod
+    def stop_playback() -> None:
+        sd.stop()
+
+    async def cancel(self) -> None:
+        while True:
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                self._queue.task_done()
+
+        await asyncio.to_thread(self.stop_playback)
+        if self._consumer is not None:
+            self._consumer.cancel()
+            try:
+                await self._consumer
+            except asyncio.CancelledError:
+                pass
+            self._consumer = asyncio.create_task(
+                self._consume(),
+                name="tts-audio-queue",
+            )
 
     async def close(self) -> None:
         if self._consumer is not None:

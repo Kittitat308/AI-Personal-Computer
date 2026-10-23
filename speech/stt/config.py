@@ -6,7 +6,6 @@ STT_DIR = Path(__file__).resolve().parent
 WHISPER_DIR = STT_DIR / "whisper"
 MODEL_PATH = WHISPER_DIR / "ggml-thonburian-distilled-small-q8_0.bin"
 WARMUP_AUDIO_PATH = STT_DIR / "warmup.wav"
-STT_RETRY_AUDIO_PATH = STT_DIR / "stt_retry.wav"
 
 WHISPER_EXECUTABLE = WHISPER_DIR / (
     "whisper-server.exe" if os.name == "nt" else "whisper-server"

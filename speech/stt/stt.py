@@ -2,6 +2,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -21,7 +22,6 @@ from speech.stt.config import (
     PORT,
     SAMPLE_RATE,
     SERVER_START_TIMEOUT_SECONDS,
-    STT_RETRY_AUDIO_PATH,
     THREADS,
     WARMUP_AUDIO_PATH,
     WARMUP_TIMEOUT_SECONDS,
@@ -39,6 +39,7 @@ class STTService:
         self.server_process: subprocess.Popen | None = None
         self.owns_server = False
         self.warmed_up = False
+        self._cancel_requested = threading.Event()
 
     def start(self) -> None:
         if self._server_is_ready():
@@ -100,14 +101,24 @@ class STTService:
         self.close()
         raise TimeoutError("รอ Whisper Server พร้อมใช้งานนานเกินไป")
 
-    def listen(self) -> str:
-        input("กด Enter เพื่อเปิดไมค์...")
-        audio_path = self._record_audio()
+    def listen(self, wait_for_press, wait_for_release) -> str:
+        print("กด F9 ค้างไว้เพื่อพูด...")
+        wait_for_press()
+        audio_path = self._record_audio(wait_for_release)
 
         try:
+            self.prepare_transcription()
             return self._transcribe(audio_path)
         finally:
             audio_path.unlink(missing_ok=True)
+
+    def prepare_transcription(self) -> None:
+        """Mark the next transcription as active before it enters a worker thread."""
+        self._cancel_requested.clear()
+
+    def request_cancel(self) -> None:
+        """Immediately mark the active transcription so late results are discarded."""
+        self._cancel_requested.set()
 
     def close(self) -> None:
         if not self.owns_server or self.server_process is None:
@@ -125,12 +136,23 @@ class STTService:
         self.owns_server = False
         self.warmed_up = False
 
+    def cancel_current(self) -> None:
+        """Cancel active inference; calling this while idle is harmless."""
+        self.request_cancel()
+        if not self._server_is_ready():
+            return
+        try:
+            self._cancel_inference()
+        except Exception as error:
+            print(f"ยกเลิก STT ไม่สำเร็จ กำลังเริ่มเซิร์ฟเวอร์ใหม่: {error}")
+            self._restart_server()
+
     @staticmethod
     def is_shutdown_command(text: str) -> bool:
         normalized = re.sub(r"[\s.!?…。、，！？]+", "", text).casefold()
         return "ปิดระบบ" in normalized
 
-    def _record_audio(self) -> Path:
+    def _record_audio(self, wait_for_release) -> Path:
         frames: list[np.ndarray] = []
 
         def callback(indata, _frames, _time_info, status) -> None:
@@ -146,7 +168,7 @@ class STTService:
                 dtype="float32",
                 callback=callback,
             ):
-                input("กด Enter เพื่อหยุดไมค์...")
+                wait_for_release()
         except Exception as error:
             raise RuntimeError(f"เปิดไมโครโฟนไม่สำเร็จ: {error}") from error
 
@@ -154,6 +176,7 @@ class STTService:
             raise RuntimeError("ไม่ได้รับข้อมูลเสียงจากไมโครโฟน")
 
         audio = np.concatenate(frames, axis=0)
+        print("ปล่อย F9 แล้ว กำลังส่งเสียงเข้า STT...")
 
         temporary = tempfile.NamedTemporaryFile(
             prefix="ai_pc_stt_",
@@ -166,6 +189,8 @@ class STTService:
         return audio_path
 
     def _transcribe(self, audio_path: Path) -> str:
+        if self._cancel_requested.is_set():
+            return ""
         print("กำลังแปลงเสียงเป็นข้อความ...")
         started = time.perf_counter()
 
@@ -179,13 +204,20 @@ class STTService:
                 )
             response.raise_for_status()
         except requests.exceptions.Timeout as error:
+            if self._cancel_requested.is_set():
+                return ""
             self._recover_from_timeout()
             raise TimeoutError(
                 f"STT ใช้เวลาเกิน {INFERENCE_TIMEOUT_SECONDS:.0f} วินาทีและถูกยกเลิก"
             ) from error
         except requests.RequestException as error:
+            if self._cancel_requested.is_set():
+                return ""
             self._recover_from_server_error()
             raise RuntimeError(f"Whisper Server ตอบกลับไม่สำเร็จ: {error}") from error
+
+        if self._cancel_requested.is_set():
+            return ""
 
         try:
             text = str(response.json().get("text", "")).strip()
@@ -197,24 +229,14 @@ class STTService:
         return text
 
     def _recover_from_timeout(self) -> None:
-        sound_started = self._start_retry_sound()
         try:
-            try:
-                self._cancel_inference()
-            except Exception as error:
-                print(f"ยกเลิก STT ไม่สำเร็จ กำลังเริ่มเซิร์ฟเวอร์ใหม่: {error}")
-                self._restart_server()
-        finally:
-            if sound_started:
-                sd.wait()
+            self._cancel_inference()
+        except Exception as error:
+            print(f"ยกเลิก STT ไม่สำเร็จ กำลังเริ่มเซิร์ฟเวอร์ใหม่: {error}")
+            self._restart_server()
 
     def _recover_from_server_error(self) -> None:
-        sound_started = self._start_retry_sound()
-        try:
-            self._restart_server()
-        finally:
-            if sound_started:
-                sd.wait()
+        self._restart_server()
 
     def _cancel_inference(self) -> None:
         response = requests.post(
@@ -239,20 +261,6 @@ class STTService:
     def _restart_server(self) -> None:
         self.close()
         self.start()
-
-    @staticmethod
-    def _start_retry_sound() -> bool:
-        try:
-            audio, sample_rate = sf.read(
-                STT_RETRY_AUDIO_PATH,
-                dtype="float32",
-                always_2d=True,
-            )
-            sd.play(audio, sample_rate)
-            return True
-        except Exception as error:
-            print(f"เล่นเสียงแจ้งเตือน STT ไม่สำเร็จ: {error}")
-            return False
 
     def _warm_up(self) -> None:
         if self.warmed_up:
@@ -289,7 +297,6 @@ class STTService:
                 WHISPER_EXECUTABLE,
                 MODEL_PATH,
                 WARMUP_AUDIO_PATH,
-                STT_RETRY_AUDIO_PATH,
             )
             if not path.is_file()
         ]

@@ -2,27 +2,42 @@ import asyncio
 import time
 
 from core.controller import Controller
-from speech.stt import STTService
+from app.stt_adapter import GUISTTService
+from speech.wakeword import WakeWordService
+from speech.wakeword.config import WAKEWORD_NAME
 from speech.tts import AudioQueue
 
 
 async def main() -> None:
     controller = Controller()
-    stt = STTService()
+    stt = GUISTTService()
     audio_queue = AudioQueue()
+    wakeword = WakeWordService()
 
     try:
         await asyncio.gather(
             controller.start(),
             asyncio.to_thread(stt.start),
+            asyncio.to_thread(wakeword.start),
             audio_queue.start(),
         )
         print("\nAI Personal Computer พร้อมใช้งาน")
-        print("กด Enter เพื่อพูด และพูดว่า 'ปิดระบบ' เพื่อออก\n")
+        print(
+            f"พูดว่า '{WAKEWORD_NAME}' เพื่อเริ่มพูดคำสั่ง "
+            "และพูดว่า 'ปิดระบบ' เพื่อออก\n"
+        )
 
         while True:
             try:
-                message = (await asyncio.to_thread(stt.listen)).strip()
+                audio = await asyncio.to_thread(wakeword.listen_for_command)
+                if not audio.size:
+                    print(
+                        f"ไม่ได้ยินคำสั่ง กรุณาพูด {WAKEWORD_NAME} "
+                        "แล้วลองใหม่ครับ\n"
+                    )
+                    continue
+                stt.prepare_transcription()
+                message = (await asyncio.to_thread(stt.transcribe_audio, audio)).strip()
             except Exception as error:
                 print(f"\nSTT ERROR:\n{error}\n")
                 continue
@@ -66,6 +81,7 @@ async def main() -> None:
 
             print(f"TOTAL: {time.perf_counter() - started:.2f} s\n")
     finally:
+        wakeword.close()
         await asyncio.to_thread(stt.close)
         try:
             await audio_queue.close()

@@ -13,15 +13,18 @@ description: Search the public web and read relevant pages for current, factual,
 - Check publication dates and event dates when recency matters. Do not treat an old article as current merely because it appears in recent search results.
 - Preserve the user's search terms, names, dates, and constraints.
 - Base every factual claim on the returned search or fetch results. Never fill missing facts with model memory or present inference as fact.
-- For a question about when something is valid, starts, ends, or expires, include both boundaries when reliable sources provide them. Do not invent a missing boundary.
-- Include a short source list at the end of the response. Give each source's title and complete HTTP or HTTPS URL, and include only sources actually returned by the tools.
-- Distinguish sourced facts from inference and identify conflicting or uncertain information explicitly.
-- Do not claim that research succeeded unless at least one supporting HTTP or HTTPS source URL was obtained. If reliable sources cannot be obtained, state that clearly and give the reason.
+- For a time-bound question, return only the boundary the user asked for. Include both start and end only when the user asks for the full period. Do not invent a missing boundary.
 - Do not click, type, sign in, submit forms, or control a visible website interface.
-- Do not claim that a search or page read succeeded unless its tool result confirms it.
+- Treat research as successful only when the tools confirm the search or page read and return at least one supporting HTTP or HTTPS source URL. Otherwise state the failure briefly.
+
+## Response requirements
+
+- Answer only the exact question in one short sentence by default.
+- Use a second short sentence only for information required to keep the answer correct and not materially misleading. Never exceed two sentences.
+- Do not report the research process, summarize unrequested findings, or include sources unless the user asks for them.
+- Do not add headings, lists, generic advice, verification suggestions, or follow-up offers.
 
 ## Available tools
 
 - `WebSearch`
 - `WebFetch`
-

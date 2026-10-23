@@ -18,6 +18,7 @@ class ClaudeSession:
         self.cwd = cwd
         self.process = None
         self.lock = asyncio.Lock()
+        self.shutdown_lock = asyncio.Lock()
         self.stderr_task = None
         self.stderr_lines: list[str] = []
 
@@ -147,3 +148,25 @@ class ClaudeSession:
 
         self.process = None
         self.stderr_task = None
+
+    async def abort(self) -> None:
+        """Immediately terminate an in-flight CLI request and discard the session."""
+        async with self.shutdown_lock:
+            process = self.process
+            stderr_task = self.stderr_task
+            if process is None:
+                return
+            if process.returncode is None:
+                process.kill()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=3)
+            except asyncio.TimeoutError:
+                pass
+            if stderr_task is not None and not stderr_task.done():
+                stderr_task.cancel()
+                try:
+                    await asyncio.wait_for(stderr_task, timeout=1)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+            self.process = None
+            self.stderr_task = None
