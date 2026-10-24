@@ -25,7 +25,15 @@ class DeviceSettings:
     tts_enabled: bool
 
 
-USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9]+$")
+USERNAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
+USERNAME_START_PATTERN = re.compile(r"^[A-Za-z]")
+NICKNAME_PATTERN = re.compile(
+    r"^(?:[A-Za-z]+(?: [A-Za-z]+)*|"
+    r"[\u0E01-\u0E2E\u0E30-\u0E3A\u0E40-\u0E4E]+"
+    r"(?: [\u0E01-\u0E2E\u0E30-\u0E3A\u0E40-\u0E4E]+)*)$"
+)
+PASSWORD_PATTERN = re.compile(r"^(?=.*[A-Za-z])(?=.*[0-9])[A-Za-z0-9]{8,}$")
+GMAIL_PATTERN = re.compile(r"^[A-Za-z0-9._%+-]+@gmail\.com$", re.IGNORECASE)
 DEVICE_SETTING_COLUMNS = {
     "microphone": "microphone_enabled",
     "camera": "camera_enabled",
@@ -65,6 +73,9 @@ class Database:
                     username TEXT NOT NULL UNIQUE COLLATE BINARY,
                     nickname TEXT NOT NULL,
                     password_hash TEXT NOT NULL,
+                    recovery_gmail TEXT,
+                    recovery_gmail_verified INTEGER NOT NULL DEFAULT 0
+                        CHECK (recovery_gmail_verified IN (0, 1)),
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
@@ -88,6 +99,16 @@ class Database:
             if "nickname" not in columns:
                 connection.execute(
                     "ALTER TABLE users ADD COLUMN nickname TEXT NOT NULL DEFAULT ''"
+                )
+            if "recovery_gmail" not in columns:
+                connection.execute("ALTER TABLE users ADD COLUMN recovery_gmail TEXT")
+            if "recovery_gmail_verified" not in columns:
+                connection.execute(
+                    """
+                    ALTER TABLE users
+                    ADD COLUMN recovery_gmail_verified INTEGER NOT NULL DEFAULT 0
+                        CHECK (recovery_gmail_verified IN (0, 1))
+                    """
                 )
             connection.execute(
                 "UPDATE users SET nickname = username WHERE TRIM(nickname) = ''"
@@ -133,15 +154,22 @@ class Database:
                     username TEXT NOT NULL UNIQUE COLLATE BINARY,
                     nickname TEXT NOT NULL,
                     password_hash TEXT NOT NULL,
+                    recovery_gmail TEXT,
+                    recovery_gmail_verified INTEGER NOT NULL DEFAULT 0
+                        CHECK (recovery_gmail_verified IN (0, 1)),
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
                 INSERT INTO users(
-                    id, username, nickname, password_hash, created_at, updated_at
+                    id, username, nickname, password_hash, recovery_gmail,
+                    recovery_gmail_verified,
+                    created_at, updated_at
                 )
                 SELECT
-                    id, username, nickname, password_hash, created_at, updated_at
+                    id, username, nickname, password_hash, recovery_gmail,
+                    recovery_gmail_verified,
+                    created_at, updated_at
                 FROM users_case_backup;
 
                 CREATE TABLE face_profiles (
@@ -182,19 +210,43 @@ class Database:
         nickname: str,
         password: str,
         embeddings: list[np.ndarray] | None = None,
+        recovery_gmail: str = "",
+        recovery_gmail_verified: bool = False,
     ) -> User:
         username = username.strip()
         nickname = nickname.strip()
-        validation_errors = self.validate_new_user(username, nickname, password)
+        recovery_gmail = recovery_gmail.strip()
+        validation_errors = self.validate_new_user(
+            username,
+            nickname,
+            password,
+            recovery_gmail,
+        )
         if validation_errors:
             raise ValueError(next(iter(validation_errors.values())))
 
         password_hash = self._hasher.hash(password)
         with self._lock, self._connection() as connection:
+            if recovery_gmail and self._recovery_gmail_owner(
+                connection,
+                recovery_gmail,
+            ) is not None:
+                raise ValueError("Gmail นี้ถูกใช้งานไปแล้ว")
             try:
                 cursor = connection.execute(
-                    "INSERT INTO users(username, nickname, password_hash) VALUES (?, ?, ?)",
-                    (username, nickname, password_hash),
+                    """
+                    INSERT INTO users(
+                        username, nickname, password_hash, recovery_gmail,
+                        recovery_gmail_verified
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        username,
+                        nickname,
+                        password_hash,
+                        recovery_gmail or None,
+                        int(bool(recovery_gmail and recovery_gmail_verified)),
+                    ),
                 )
             except sqlite3.IntegrityError as error:
                 raise ValueError("ชื่อผู้ใช้นี้มีอยู่แล้ว") from error
@@ -299,6 +351,104 @@ class Database:
             ).fetchone()
         return row is not None
 
+    def user_has_face_profiles(self, user_id: int) -> bool:
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM face_profiles WHERE user_id = ? LIMIT 1",
+                (user_id,),
+            ).fetchone()
+        return row is not None
+
+    def get_user(self, user_id: int) -> User | None:
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                "SELECT id, username, nickname FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return User(int(row["id"]), str(row["username"]), str(row["nickname"]))
+
+    def get_recovery_gmail(self, user_id: int) -> str:
+        gmail, _verified = self.get_recovery_gmail_status(user_id)
+        return gmail
+
+    def get_verified_recovery_gmail(self, user_id: int) -> str:
+        gmail, verified = self.get_recovery_gmail_status(user_id)
+        return gmail if verified else ""
+
+    def get_user_by_verified_recovery_gmail(
+        self,
+        recovery_gmail: str,
+    ) -> User | None:
+        recovery_gmail = recovery_gmail.strip()
+        if not recovery_gmail:
+            return None
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT id, username, nickname
+                FROM users
+                WHERE recovery_gmail = ? COLLATE NOCASE
+                  AND recovery_gmail_verified = 1
+                LIMIT 1
+                """,
+                (recovery_gmail,),
+            ).fetchone()
+        if row is None:
+            return None
+        return User(int(row["id"]), str(row["username"]), str(row["nickname"]))
+
+    def get_recovery_gmail_status(self, user_id: int) -> tuple[str, bool]:
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT recovery_gmail, recovery_gmail_verified
+                FROM users
+                WHERE id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+        if row is None or row["recovery_gmail"] is None:
+            return "", False
+        return (
+            str(row["recovery_gmail"]).strip(),
+            bool(row["recovery_gmail_verified"]),
+        )
+
+    def recovery_gmail_in_use(
+        self,
+        recovery_gmail: str,
+        exclude_user_id: int | None = None,
+    ) -> bool:
+        recovery_gmail = recovery_gmail.strip()
+        if not recovery_gmail:
+            return False
+        with self._lock, self._connection() as connection:
+            return self._recovery_gmail_owner(
+                connection,
+                recovery_gmail,
+                exclude_user_id,
+            ) is not None
+
+    @staticmethod
+    def _recovery_gmail_owner(
+        connection: sqlite3.Connection,
+        recovery_gmail: str,
+        exclude_user_id: int | None = None,
+    ) -> int | None:
+        query = (
+            "SELECT id FROM users "
+            "WHERE recovery_gmail = ? COLLATE NOCASE"
+        )
+        parameters: list[object] = [recovery_gmail.strip()]
+        if exclude_user_id is not None:
+            query += " AND id <> ?"
+            parameters.append(exclude_user_id)
+        query += " LIMIT 1"
+        row = connection.execute(query, parameters).fetchone()
+        return None if row is None else int(row["id"])
+
     @staticmethod
     def _replace_embeddings(
         connection: sqlite3.Connection,
@@ -316,21 +466,43 @@ class Database:
             ],
         )
 
-    def update_user(self, user_id: int, username: str, nickname: str) -> User:
+    def update_user(
+        self,
+        user_id: int,
+        username: str,
+        nickname: str,
+        recovery_gmail: str = "",
+        recovery_gmail_verified: bool = False,
+    ) -> User:
         username = username.strip()
         nickname = nickname.strip()
-        self._validate_username(username)
-        if not nickname:
-            raise ValueError("กรุณากรอกชื่อเล่น")
+        recovery_gmail = recovery_gmail.strip()
+        errors = self.validate_user_profile(username, nickname, recovery_gmail)
+        if errors:
+            raise ValueError(next(iter(errors.values())))
         with self._lock, self._connection() as connection:
+            if recovery_gmail and self._recovery_gmail_owner(
+                connection,
+                recovery_gmail,
+                user_id,
+            ) is not None:
+                raise ValueError("Gmail นี้ถูกใช้งานไปแล้ว")
             try:
                 connection.execute(
                     """
                     UPDATE users
-                    SET username = ?, nickname = ?, updated_at = CURRENT_TIMESTAMP
+                    SET username = ?, nickname = ?, recovery_gmail = ?,
+                        recovery_gmail_verified = ?,
+                        updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                     """,
-                    (username, nickname, user_id),
+                    (
+                        username,
+                        nickname,
+                        recovery_gmail or None,
+                        int(bool(recovery_gmail and recovery_gmail_verified)),
+                        user_id,
+                    ),
                 )
             except sqlite3.IntegrityError as error:
                 raise ValueError("ชื่อผู้ใช้นี้มีอยู่แล้ว") from error
@@ -340,35 +512,73 @@ class Database:
     def _validate_username(username: str) -> None:
         if not username:
             raise ValueError("กรุณากรอกชื่อผู้ใช้")
+        if USERNAME_START_PATTERN.match(username) is None:
+            raise ValueError(
+                "ชื่อผู้ใช้ต้องขึ้นต้นด้วยตัวอักษรภาษาอังกฤษ"
+            )
         if USERNAME_PATTERN.fullmatch(username) is None:
             raise ValueError(
-                "ชื่อผู้ใช้ใช้ได้เฉพาะตัวอักษรภาษาอังกฤษและตัวเลขเท่านั้น"
+                "ใช้ได้เฉพาะตัวอักษรภาษาอังกฤษกับตัวเลขเท่านั้น"
             )
+
+    @staticmethod
+    def validate_user_profile(
+        username: str,
+        nickname: str,
+        recovery_gmail: str = "",
+    ) -> dict[str, str]:
+        errors: dict[str, str] = {}
+        username = username.strip()
+        nickname = nickname.strip()
+        recovery_gmail = recovery_gmail.strip()
+        if not username:
+            errors["username"] = "กรุณากรอกชื่อผู้ใช้"
+        elif USERNAME_START_PATTERN.match(username) is None:
+            errors["username"] = (
+                "ชื่อผู้ใช้ต้องขึ้นต้นด้วยตัวอักษรภาษาอังกฤษ"
+            )
+        elif USERNAME_PATTERN.fullmatch(username) is None:
+            errors["username"] = (
+                "ใช้ได้เฉพาะตัวอักษรภาษาอังกฤษกับตัวเลขเท่านั้น"
+            )
+        if not nickname:
+            errors["nickname"] = "กรุณากรอกชื่อเล่น"
+        elif NICKNAME_PATTERN.fullmatch(nickname) is None:
+            errors["nickname"] = (
+                "ชื่อเล่นต้องเป็นภาษาไทยล้วนหรืออังกฤษล้วน"
+            )
+        recovery_error = Database.validate_recovery_gmail(recovery_gmail)
+        if recovery_error:
+            errors["recovery_gmail"] = recovery_error
+        return errors
+
+    @staticmethod
+    def validate_recovery_gmail(recovery_gmail: str) -> str:
+        recovery_gmail = recovery_gmail.strip()
+        if recovery_gmail and GMAIL_PATTERN.fullmatch(recovery_gmail) is None:
+            return "รูปแบบ Gmail ไม่ถูกต้อง"
+        return ""
 
     @staticmethod
     def validate_new_user(
         username: str,
         nickname: str,
         password: str,
+        recovery_gmail: str = "",
     ) -> dict[str, str]:
-        errors: dict[str, str] = {}
-        username = username.strip()
-        nickname = nickname.strip()
-        if not username:
-            errors["username"] = "กรุณากรอกชื่อผู้ใช้"
-        elif USERNAME_PATTERN.fullmatch(username) is None:
-            errors["username"] = (
-                "ชื่อผู้ใช้ใช้ได้เฉพาะตัวอักษรภาษาอังกฤษและตัวเลขเท่านั้น"
+        errors = Database.validate_user_profile(
+            username,
+            nickname,
+            recovery_gmail,
+        )
+        if PASSWORD_PATTERN.fullmatch(password) is None:
+            errors["password"] = (
+                "รหัสผ่านต้องมีอังกฤษและตัวเลข อย่างน้อย 8 ตัว"
             )
-        if not nickname:
-            errors["nickname"] = "กรุณากรอกชื่อเล่น"
-        if len(password) < 8:
-            errors["password"] = "รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร"
         return errors
 
     def change_password(self, user_id: int, current: str, new: str) -> None:
-        if len(new) < 8:
-            raise ValueError("รหัสผ่านใหม่ต้องมีอย่างน้อย 8 ตัวอักษร")
+        self._validate_password(new, "รหัสผ่านใหม่")
         with self._lock, self._connection() as connection:
             row = connection.execute(
                 "SELECT password_hash FROM users WHERE id = ?", (user_id,)
@@ -385,8 +595,7 @@ class Database:
             )
 
     def reset_password(self, user_id: int, new: str) -> None:
-        if len(new) < 8:
-            raise ValueError("รหัสผ่านใหม่ต้องมีอย่างน้อย 8 ตัวอักษร")
+        self._validate_password(new, "รหัสผ่านใหม่")
         with self._lock, self._connection() as connection:
             cursor = connection.execute(
                 """
@@ -398,3 +607,10 @@ class Database:
             )
             if cursor.rowcount != 1:
                 raise ValueError("ไม่พบบัญชีผู้ใช้")
+
+    @staticmethod
+    def _validate_password(password: str, label: str = "รหัสผ่าน") -> None:
+        if PASSWORD_PATTERN.fullmatch(password) is None:
+            raise ValueError(
+                f"{label}ต้องมีอังกฤษและตัวเลข อย่างน้อย 8 ตัว"
+            )

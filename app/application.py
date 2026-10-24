@@ -1,6 +1,9 @@
 import asyncio
+import hmac
+import secrets
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -20,8 +23,10 @@ from app.ui import (
     LoadingDialog,
     MainWindow,
     NoticeDialog,
+    OtpDialog,
     numpy_to_pixmap,
 )
+from app.recovery_email import RecoveryEmailSender
 from app.voice import ManualRecorder, VoiceListener
 from speech.wakeword import WakeWordListener, WakeWordService
 from speech.tts import AudioQueue
@@ -54,6 +59,7 @@ class DesktopApplication:
         self.controller = GUIController()
         self.stt = GUISTTService()
         self.audio_queue = AudioQueue()
+        self.recovery_email = RecoveryEmailSender(project_root)
         self.wakeword = WakeWordService()
         self.wakeword_listener: WakeWordListener | None = None
         self.wakeword_ready = False
@@ -85,6 +91,13 @@ class DesktopApplication:
         self.recovery_dialog: FaceScanDialog | None = None
         self.recovery_face_count = 0
         self.recovery_scan_running = False
+        self.recovery_target_user_id: int | None = None
+        self.otp_dialog: OtpDialog | None = None
+        self.otp_recipient = ""
+        self.otp_success_callback = None
+        self.otp_controls_account_dialog = False
+        self.otp_code = ""
+        self.otp_expires_at = 0.0
         self.account_dialog_open = False
         self.logout_in_progress = False
         self.shutdown_started = False
@@ -95,7 +108,7 @@ class DesktopApplication:
         self.preview_timer.setInterval(80)
         self.preview_timer.timeout.connect(self._update_camera_preview)
         self.login_timer = QTimer()
-        self.login_timer.setInterval(2_000)
+        self.login_timer.setInterval(1_000)
         self.login_timer.timeout.connect(self._schedule_login_face_check)
         self.presence_timer = QTimer()
         self.presence_timer.setInterval(60_000)
@@ -118,6 +131,9 @@ class DesktopApplication:
         self.window.chat.message_submitted.connect(self._on_typed_message)
         self.window.chat.folder_requested.connect(self.select_folder)
         self.window.chat.folder_cleared.connect(self.clear_folder)
+        self.window.chat.permission_mode_changed.connect(
+            self.controller.set_admin_permission_mode
+        )
         self.window.chat.profile_requested.connect(self.open_profile_menu)
         self.window.chat.toggle_requested.connect(self._on_toggle_requested)
         self.window.chat.voice_mode_changed.connect(self._on_voice_mode_changed)
@@ -467,31 +483,46 @@ class DesktopApplication:
             QTimer.singleShot(0, self.open_password_recovery)
 
     def open_password_recovery(self) -> None:
-        if self.recovery_dialog is not None or self.account_dialog_open:
+        if self.otp_dialog is not None or self.account_dialog_open:
             return
-        if not self.state.camera_enabled:
-            self.window.login.status.setText(
-                "ไม่สามารถรีเซ็ตรหัสผ่านได้ เพราะไม่พบกล้องที่เปิดใช้งาน"
-            )
-            return
-        if not self.database.has_face_profiles():
-            self.window.login.status.setText(
-                "ไม่มีบัญชีที่ลงทะเบียนใบหน้าสำหรับรีเซ็ตรหัสผ่าน"
-            )
-            return
-
-        self.recovery_face_count = 0
-        dialog = FaceScanDialog(
+        camera_was_enabled = self._suspend_camera_for_account_dialog()
+        self.account_dialog_open = True
+        dialog = FormDialog(
+            "ลืมรหัสผ่าน",
+            [("Gmail สำหรับกู้คืน", False, True, "Gmail สำหรับกู้คืน")],
             self.window,
-            title_text="ยืนยันใบหน้า",
-            status_text="มองกล้องเพื่อยืนยันตัวตน",
-            show_next_button=False,
-            show_retry_button=False,
+            submit_text="ถัดไป",
         )
-        self.recovery_dialog = dialog
-        dialog.finished.connect(self._recovery_closed)
-        self.recovery_timer.start()
-        dialog.open()
+        selected_user = None
+        selected_gmail = ""
+
+        def submit(values: list[str]) -> None:
+            nonlocal selected_user, selected_gmail
+            gmail = values[0].strip()
+            error = self.database.validate_recovery_gmail(gmail)
+            if error:
+                dialog.show_errors({0: error})
+                return
+            user = self.database.get_user_by_verified_recovery_gmail(gmail)
+            if user is None:
+                dialog.show_errors({0: "ไม่มีเมลนี้ในระบบ"})
+                return
+            selected_user = user
+            selected_gmail = gmail
+            dialog.accept()
+
+        dialog.submitted.connect(submit)
+        try:
+            dialog.exec()
+        finally:
+            self.account_dialog_open = False
+            self._restore_camera_after_account_dialog(camera_was_enabled)
+        if selected_user is not None:
+            QTimer.singleShot(
+                0,
+                lambda user=selected_user, gmail=selected_gmail:
+                self._open_otp_password_recovery(user, gmail),
+            )
 
     def _schedule_recovery_scan(self) -> None:
         if (
@@ -533,6 +564,15 @@ class DesktopApplication:
                 if self.recovery_dialog is not None:
                     self.recovery_dialog.status.setText("ไม่พบใบหน้าที่ลงทะเบียนไว้")
                 return
+            if (
+                self.recovery_target_user_id is not None
+                and user.id != self.recovery_target_user_id
+            ):
+                if self.recovery_dialog is not None:
+                    self.recovery_dialog.status.setText(
+                        "ใบหน้าไม่ตรงกับบัญชีที่กำลังใช้งาน"
+                    )
+                return
 
             self.recovery_timer.stop()
             if self.recovery_dialog is not None:
@@ -548,6 +588,171 @@ class DesktopApplication:
         self.recovery_dialog = None
         self.recovery_face_count = 0
         self.recovery_scan_running = False
+        self.recovery_target_user_id = None
+
+    def _start_chat_password_recovery(self) -> None:
+        user_id = self.state.current_user_id
+        if user_id is None:
+            return
+        user = self.database.get_user(user_id)
+        if user is None:
+            self._show_error("ไม่พบบัญชีผู้ใช้")
+            return
+        has_face = self.database.user_has_face_profiles(user_id)
+        recovery_gmail = self.database.get_verified_recovery_gmail(user_id)
+
+        if has_face and self.state.camera_enabled:
+            self._open_chat_face_recovery(user_id)
+            return
+        if recovery_gmail:
+            self._open_otp_password_recovery(user, recovery_gmail)
+            return
+        if has_face:
+            self._show_error("กรุณาเปิดกล้องก่อนกู้คืนรหัสผ่านด้วยใบหน้า")
+            return
+        self._show_error(
+            "ไม่มีใบหน้าหรือ Gmail สำหรับการกู้คืนรหัสผ่าน"
+        )
+
+    def _open_chat_face_recovery(self, user_id: int) -> None:
+        if self.recovery_dialog is not None or self.account_dialog_open:
+            return
+        self.recovery_face_count = 0
+        self.recovery_target_user_id = user_id
+        dialog = FaceScanDialog(
+            self.window,
+            title_text="ยืนยันใบหน้า",
+            status_text="มองกล้องเพื่อยืนยันตัวตน",
+            show_next_button=False,
+            show_retry_button=False,
+        )
+        self.recovery_dialog = dialog
+        dialog.finished.connect(self._recovery_closed)
+        self.recovery_timer.start()
+        dialog.open()
+
+    def _open_otp_password_recovery(self, user, recovery_gmail: str) -> None:
+        if self.otp_dialog is not None or self.account_dialog_open:
+            return
+        self.account_dialog_open = True
+        self._open_otp_dialog(
+            recovery_gmail,
+            lambda selected_user=user: self._open_reset_password_form(selected_user),
+            self.window,
+            controls_account_dialog=True,
+        )
+
+    def _open_otp_dialog(
+        self,
+        recipient: str,
+        success_callback,
+        parent=None,
+        controls_account_dialog: bool = False,
+    ) -> None:
+        if self.otp_dialog is not None:
+            return
+        dialog = OtpDialog(self._mask_gmail(recipient), parent or self.window)
+        self.otp_dialog = dialog
+        self.otp_recipient = recipient
+        self.otp_success_callback = success_callback
+        self.otp_controls_account_dialog = controls_account_dialog
+        dialog.code_completed.connect(self._verify_recovery_otp)
+        dialog.resend_requested.connect(self._request_recovery_otp)
+        dialog.finished.connect(self._otp_recovery_closed)
+        dialog.open()
+        self._request_recovery_otp()
+
+    def _request_recovery_otp(self) -> None:
+        if self.otp_dialog is None or not self.otp_recipient:
+            return
+        self.otp_dialog.set_sending()
+        asyncio.create_task(self._send_recovery_otp())
+
+    async def _send_recovery_otp(self) -> None:
+        dialog = self.otp_dialog
+        recipient = self.otp_recipient
+        if dialog is None or not recipient:
+            return
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        try:
+            await asyncio.to_thread(
+                self.recovery_email.send_otp,
+                recipient,
+                code,
+            )
+        except Exception as error:
+            print(f"RECOVERY EMAIL ERROR: {error}")
+            if self.otp_dialog is dialog:
+                dialog.show_send_error("ส่งรหัสไม่สำเร็จ กรุณาลองอีกครั้ง")
+            return
+        if self.otp_dialog is not dialog:
+            return
+        self.otp_code = code
+        self.otp_expires_at = time.monotonic() + 600
+        dialog.start_resend_cooldown(60)
+
+    def _verify_recovery_otp(self, code: str) -> None:
+        dialog = self.otp_dialog
+        if dialog is None or self.otp_success_callback is None:
+            return
+        if time.monotonic() > self.otp_expires_at:
+            dialog.reset_code("รหัสหมดอายุแล้ว กรุณาส่งรหัสอีกครั้ง")
+            return
+        if not self.otp_code or not hmac.compare_digest(code, self.otp_code):
+            dialog.reset_code("รหัสไม่ถูกต้อง")
+            return
+        success_callback = self.otp_success_callback
+        dialog.accept()
+        QTimer.singleShot(0, success_callback)
+
+    def _otp_recovery_closed(self) -> None:
+        controls_account_dialog = self.otp_controls_account_dialog
+        self.otp_dialog = None
+        self.otp_recipient = ""
+        self.otp_success_callback = None
+        self.otp_controls_account_dialog = False
+        self.otp_code = ""
+        self.otp_expires_at = 0.0
+        if controls_account_dialog:
+            self.account_dialog_open = False
+
+    def _verify_form_gmail(
+        self,
+        dialog: FormDialog,
+        field_index: int,
+        user_id: int | None = None,
+    ) -> None:
+        gmail = dialog.inputs[field_index].text().strip()
+        error = self.database.validate_recovery_gmail(gmail)
+        if error:
+            dialog.show_errors({field_index: error})
+            return
+        if not gmail:
+            return
+        if user_id is not None:
+            saved_gmail, saved_verified = (
+                self.database.get_recovery_gmail_status(user_id)
+            )
+            if saved_verified and saved_gmail.casefold() == gmail.casefold():
+                dialog.set_field_verified(field_index, True, gmail)
+                return
+        if self.database.recovery_gmail_in_use(gmail, user_id):
+            dialog.show_errors({field_index: "Gmail นี้ถูกใช้งานไปแล้ว"})
+            return
+        self._open_otp_dialog(
+            gmail,
+            lambda selected_dialog=dialog, index=field_index, value=gmail:
+            selected_dialog.set_field_verified(index, True, value),
+            dialog,
+        )
+
+    @staticmethod
+    def _mask_gmail(address: str) -> str:
+        local, separator, domain = address.partition("@")
+        if not separator:
+            return address
+        visible = local[:2]
+        return f"{visible}{'*' * max(3, len(local) - len(visible))}@{domain}"
 
     def _open_reset_password_form(self, user) -> None:
         camera_was_enabled = self._suspend_camera_for_account_dialog()
@@ -637,12 +842,18 @@ class DesktopApplication:
         dialog = FormDialog(
             "สมัครบัญชีด้วยใบหน้า" if includes_face else "สมัครบัญชี",
             [
-                ("ชื่อผู้ใช้ (ภาษาอังกฤษและตัวเลข)", False),
-                ("ชื่อเล่น", False),
-                ("รหัสผ่าน", True),
-                ("ยืนยันรหัสผ่าน", True),
+                ("ชื่อผู้ใช้ (ภาษาอังกฤษและตัวเลข)", False, True, "ชื่อผู้ใช้"),
+                ("ชื่อเล่น", False, True, "ชื่อเล่น"),
+                ("รหัสผ่าน", True, True, "รหัสผ่าน"),
+                ("ยืนยันรหัสผ่าน", True, True, "ยืนยันรหัสผ่าน"),
+                ("Gmail สำหรับกู้คืน (ถ้ามี)", False, False, "Gmail สำหรับกู้คืน"),
             ],
             self.window,
+            compact_actions=True,
+            field_actions={4: "ยืนยัน"},
+        )
+        dialog.field_action_requested.connect(
+            lambda index: self._verify_form_gmail(dialog, index, None)
         )
 
         def submit(values: list[str]) -> None:
@@ -650,8 +861,14 @@ class DesktopApplication:
                 values[0],
                 values[1],
                 values[2],
+                values[4],
             )
-            field_indexes = {"username": 0, "nickname": 1, "password": 2}
+            field_indexes = {
+                "username": 0,
+                "nickname": 1,
+                "password": 2,
+                "recovery_gmail": 4,
+            }
             field_errors = {
                 field_indexes[name]: message
                 for name, message in validation.items()
@@ -667,6 +884,8 @@ class DesktopApplication:
                     values[1],
                     values[2],
                     embeddings,
+                    recovery_gmail=values[4],
+                    recovery_gmail_verified=dialog.is_field_verified(4),
                 )
             except ValueError as error:
                 dialog.show_error(str(error))
@@ -723,6 +942,8 @@ class DesktopApplication:
         self.window.chat.set_folder(None)
         self.window.chat.set_nickname(nickname)
         self.window.chat.set_voice_mode("normal")
+        self.window.chat.set_permission_mode("ask")
+        self.controller.set_admin_permission_mode("ask")
         self.window.show_chat()
         asyncio.create_task(self._enter_chat_session())
 
@@ -1418,18 +1639,57 @@ class DesktopApplication:
     def rename_user(self) -> None:
         dialog = FormDialog(
             "แก้ไขข้อมูลผู้ใช้",
-            [("ชื่อผู้ใช้ (ภาษาอังกฤษและตัวเลข)", False), ("ชื่อเล่น", False)],
+            [
+                ("ชื่อผู้ใช้ (ภาษาอังกฤษและตัวเลข)", False, True, "ชื่อผู้ใช้"),
+                ("ชื่อเล่น", False, True, "ชื่อเล่น"),
+                ("Gmail สำหรับกู้คืน (ถ้ามี)", False, False, "Gmail สำหรับกู้คืน"),
+            ],
             self.window,
+            compact_actions=True,
+            field_actions={2: "ยืนยัน"},
+            submit_text="บันทึก",
         )
         dialog.inputs[0].setText(self.state.current_username)
         dialog.inputs[1].setText(self.state.current_nickname)
+        recovery_gmail, recovery_gmail_verified = (
+            self.database.get_recovery_gmail_status(self.state.current_user_id)
+        )
+        dialog.inputs[2].setText(recovery_gmail)
+        dialog.set_field_verified(2, recovery_gmail_verified, recovery_gmail)
+        dialog.field_action_requested.connect(
+            lambda index: self._verify_form_gmail(
+                dialog,
+                index,
+                self.state.current_user_id,
+            )
+        )
 
         def submit(values):
+            validation = self.database.validate_user_profile(
+                values[0],
+                values[1],
+                values[2],
+            )
+            field_indexes = {
+                "username": 0,
+                "nickname": 1,
+                "recovery_gmail": 2,
+            }
+            if validation:
+                dialog.show_errors(
+                    {
+                        field_indexes[name]: message
+                        for name, message in validation.items()
+                    }
+                )
+                return
             try:
                 user = self.database.update_user(
                     self.state.current_user_id,
                     values[0],
                     values[1],
+                    values[2],
+                    recovery_gmail_verified=dialog.is_field_verified(2),
                 )
             except ValueError as error:
                 dialog.show_error(str(error))
@@ -1445,9 +1705,16 @@ class DesktopApplication:
     def change_password(self) -> None:
         dialog = FormDialog(
             "เปลี่ยนรหัสผ่าน",
-            [("รหัสผ่านปัจจุบัน", True), ("รหัสผ่านใหม่", True), ("ยืนยันรหัสผ่านใหม่", True)],
+            [
+                ("รหัสผ่านปัจจุบัน", True),
+                ("รหัสผ่านใหม่", True),
+                ("ยืนยันรหัสผ่านใหม่", True),
+            ],
             self.window,
+            secondary_text="ลืมรหัสผ่าน",
+            compact_secondary_actions=True,
         )
+        forgot_password = False
 
         def submit(values):
             if values[1] != values[2]:
@@ -1461,7 +1728,16 @@ class DesktopApplication:
             dialog.accept()
 
         dialog.submitted.connect(submit)
+
+        def request_password_recovery() -> None:
+            nonlocal forgot_password
+            forgot_password = True
+            dialog.reject()
+
+        dialog.secondary_requested.connect(request_password_recovery)
         dialog.exec()
+        if forgot_password:
+            QTimer.singleShot(0, self._start_chat_password_recovery)
 
     def manage_face(self) -> None:
         if not self.state.camera_enabled:

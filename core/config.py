@@ -6,6 +6,7 @@ PROMPTS_DIR = PROJECT_ROOT / "prompts"
 SKILLS_DIR = PROJECT_ROOT / ".claude" / "skills"
 
 MODEL = "haiku"
+CONFIRMATION_MODEL = "haiku"
 ADMIN_MODEL = "claude-opus-5-5"
 ADMIN_EFFORT = "medium"
 CHAT_SESSION_TURN_LIMIT = 10

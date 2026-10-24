@@ -2,7 +2,15 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    QPointF,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QFontMetrics,
@@ -114,6 +122,10 @@ QDialog#popup QPushButton#cancel:hover { background: #ad2735; border-color: #ff6
 QDialog#popup QPushButton#secondaryAction { background: #d8eaff; color: #075bb5; border-color: #78aee4; font-weight: 600; }
 QDialog#popup QPushButton#secondaryAction:hover { background: #bddcff; border-color: #168bea; }
 QDialog#popup QPushButton#secondaryAction:disabled { background: #c7ccd2; color: #737c86; border-color: #aeb5bd; }
+QDialog#popup QPushButton#verifyEmail { background: #e5a900; color: #152238; border-color: #f2c94c; font-weight: 700; }
+QDialog#popup QPushButton#verifyEmail:hover { background: #c99000; border-color: #dfb52d; }
+QDialog#popup QPushButton#verifyEmail:disabled { background: #c7ccd2; color: #737c86; border-color: #aeb5bd; }
+QDialog#popup QPushButton#verifiedEmail:disabled { background: #27a85f; color: white; border-color: #3fc879; font-weight: 700; }
 QMessageBox { background: #f7f9fc; }
 QMessageBox QLabel { background: transparent; color: #10243a; }
 QMessageBox QPushButton { background: #edf3f9; color: #10243a; border: 1px solid #9eb2c8; }
@@ -483,6 +495,65 @@ class ProfileButton(QAbstractButton):
         painter.drawLine(QPointF(arrow_x, arrow_y - 4), QPointF(arrow_x + 7, arrow_y + 4))
 
 
+class PermissionModeButton(QAbstractButton):
+    def __init__(self, label: str = "ขออนุมัติ", parent=None):
+        super().__init__(parent)
+        self.label = ""
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(48)
+        self.set_label(label)
+
+    def set_label(self, label: str) -> None:
+        self.label = label
+        text_width = QFontMetrics(self.font()).horizontalAdvance(label)
+        self.setFixedWidth(text_width + 58)
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        if not self.isEnabled():
+            background = QColor("#0b1726")
+            border = QColor("#344c68")
+            foreground = QColor("#71859f")
+        else:
+            background = QColor("#1a3555") if self.underMouse() else QColor("#13243a")
+            border = QColor("#2e9bff") if self.underMouse() else QColor("#66809d")
+            foreground = QColor("#f3f7ff")
+        painter.setPen(QPen(border, 1.5))
+        painter.setBrush(background)
+        painter.drawRoundedRect(
+            QRectF(1, 1, self.width() - 2, self.height() - 2),
+            14,
+            14,
+        )
+
+        painter.setPen(foreground)
+        text_rect = self.rect().adjusted(14, 0, -38, 0)
+        painter.drawText(text_rect, Qt.AlignCenter, self.label)
+
+        arrow_x = self.width() - 21
+        arrow_y = self.height() / 2
+        painter.setPen(
+            QPen(
+                foreground,
+                2.5,
+                Qt.SolidLine,
+                Qt.RoundCap,
+                Qt.RoundJoin,
+            )
+        )
+        painter.drawLine(
+            QPointF(arrow_x - 6, arrow_y + 3),
+            QPointF(arrow_x, arrow_y - 3),
+        )
+        painter.drawLine(
+            QPointF(arrow_x, arrow_y - 3),
+            QPointF(arrow_x + 6, arrow_y + 3),
+        )
+
+
 class LoadingDialog(QDialog):
     def __init__(self, title: str, message: str, parent=None):
         super().__init__(parent)
@@ -508,13 +579,18 @@ class LoadingDialog(QDialog):
 class FormDialog(QDialog):
     submitted = Signal(list)
     secondary_requested = Signal()
+    field_action_requested = Signal(int)
 
     def __init__(
         self,
         title: str,
-        fields: list[tuple[str, bool]],
+        fields: list[tuple],
         parent=None,
         secondary_text: str | None = None,
+        compact_actions: bool = False,
+        compact_secondary_actions: bool = False,
+        field_actions: dict[int, str] | None = None,
+        submit_text: str = "ยืนยัน",
     ):
         super().__init__(parent)
         self.setObjectName("popup")
@@ -522,7 +598,11 @@ class FormDialog(QDialog):
         self.setMinimumWidth(560)
         self.inputs: list[QLineEdit] = []
         self.field_labels: list[str] = []
+        self.required_fields: list[bool] = []
         self.field_errors: list[QLabel] = []
+        self.field_action_buttons: dict[int, QPushButton] = {}
+        self.field_verified_values: dict[int, str] = {}
+        field_actions = field_actions or {}
         outer = QVBoxLayout(self)
         outer.setContentsMargins(34, 30, 34, 30)
         heading = QLabel(title)
@@ -530,17 +610,58 @@ class FormDialog(QDialog):
         heading.setAlignment(Qt.AlignCenter)
         outer.addWidget(heading)
         outer.addSpacing(24)
-        for label_text, secret in fields:
+        for field_spec in fields:
+            if len(field_spec) == 2:
+                label_text, secret = field_spec
+                required = True
+                placeholder = label_text
+                show_required_marker = False
+            elif len(field_spec) == 3:
+                label_text, secret, required = field_spec
+                placeholder = label_text
+                show_required_marker = required
+            elif len(field_spec) == 4:
+                label_text, secret, required, placeholder = field_spec
+                show_required_marker = required
+            else:
+                raise ValueError("ข้อมูลช่องกรอกไม่ถูกต้อง")
             self.field_labels.append(label_text)
-            outer.addWidget(QLabel(label_text))
+            self.required_fields.append(required)
+            label_row = QHBoxLayout()
+            label_row.setSpacing(5)
+            label_row.addWidget(QLabel(label_text))
+            if show_required_marker:
+                required_marker = QLabel("*")
+                required_marker.setObjectName("error")
+                label_row.addWidget(required_marker)
+            label_row.addStretch()
+            outer.addLayout(label_row)
             field = QLineEdit()
-            field.setPlaceholderText(label_text)
+            field.setPlaceholderText(placeholder)
             if secret:
                 field.setEchoMode(QLineEdit.Password)
             self.inputs.append(field)
-            outer.addWidget(field)
+            field_index = len(self.inputs) - 1
+            if field_index in field_actions:
+                field_row = QHBoxLayout()
+                field_row.setSpacing(10)
+                field_row.addWidget(field, 1)
+                action = QPushButton(field_actions[field_index])
+                action.setObjectName("verifyEmail")
+                action.setFixedWidth(120)
+                action.setEnabled(False)
+                action.clicked.connect(
+                    lambda _checked=False, index=field_index:
+                    self.field_action_requested.emit(index)
+                )
+                self.field_action_buttons[field_index] = action
+                field_row.addWidget(action)
+                outer.addLayout(field_row)
+            else:
+                outer.addWidget(field)
             error = QLabel("")
             error.setObjectName("error")
+            error.setFixedHeight(20)
             self.field_errors.append(error)
             outer.addWidget(error)
         self.error = QLabel("")
@@ -549,7 +670,7 @@ class FormDialog(QDialog):
         buttons = QHBoxLayout()
         cancel = QPushButton("ยกเลิก")
         cancel.setObjectName("cancel")
-        self.submit_button = QPushButton("ยืนยัน")
+        self.submit_button = QPushButton(submit_text)
         self.submit_button.setObjectName("primary")
         self.submit_button.setEnabled(False)
         cancel.clicked.connect(self.reject)
@@ -558,23 +679,91 @@ class FormDialog(QDialog):
         )
         for index, field in enumerate(self.inputs):
             field.textChanged.connect(self._update_submit_enabled)
+            if index in self.field_action_buttons:
+                field.textChanged.connect(
+                    lambda text, field_index=index:
+                    self._field_action_text_changed(field_index, text)
+                )
             field.textChanged.connect(
                 lambda _text, field_index=index: self._clear_field_error(field_index)
             )
         if secondary_text:
             secondary = QPushButton(secondary_text)
             secondary.setObjectName("secondaryAction")
+            if compact_secondary_actions:
+                secondary.setFixedWidth(160)
+                cancel.setFixedWidth(120)
+                self.submit_button.setFixedWidth(120)
             secondary.clicked.connect(self.secondary_requested)
             buttons.addWidget(secondary)
             buttons.addStretch()
+        elif compact_actions:
+            cancel.setFixedWidth(190)
+            self.submit_button.setFixedWidth(190)
+            buttons.addStretch()
         buttons.addWidget(cancel)
+        if compact_actions and not secondary_text:
+            buttons.addSpacing(72)
         buttons.addWidget(self.submit_button)
+        if compact_actions and not secondary_text:
+            buttons.addStretch()
         outer.addLayout(buttons)
 
     def _update_submit_enabled(self) -> None:
-        self.submit_button.setEnabled(
-            bool(self.inputs) and all(field.text().strip() for field in self.inputs)
+        required_complete = bool(self.inputs) and all(
+            not required or field.text().strip()
+            for field, required in zip(self.inputs, self.required_fields)
         )
+        actions_valid = all(
+            not self.inputs[index].text().strip() or self.is_field_verified(index)
+            for index in self.field_action_buttons
+        )
+        self.submit_button.setEnabled(required_complete and actions_valid)
+
+    def set_field_verified(
+        self,
+        index: int,
+        verified: bool,
+        value: str | None = None,
+    ) -> None:
+        button = self.field_action_buttons.get(index)
+        if button is None:
+            return
+        current_value = self.inputs[index].text().strip()
+        if verified and current_value:
+            self.field_verified_values[index] = (
+                current_value if value is None else value.strip()
+            )
+            button.setText("ยืนยันแล้ว")
+            button.setObjectName("verifiedEmail")
+            button.setEnabled(False)
+        else:
+            self.field_verified_values.pop(index, None)
+            button.setText("ยืนยัน")
+            button.setObjectName("verifyEmail")
+            button.setEnabled(bool(current_value))
+        button.style().unpolish(button)
+        button.style().polish(button)
+        self._update_submit_enabled()
+
+    def is_field_verified(self, index: int) -> bool:
+        return bool(self.inputs[index].text().strip()) and (
+            self.field_verified_values.get(index)
+            == self.inputs[index].text().strip()
+        )
+
+    def _field_action_text_changed(self, index: int, text: str) -> None:
+        verified_value = self.field_verified_values.get(index)
+        if verified_value is not None and verified_value != text.strip():
+            self.field_verified_values.pop(index, None)
+        button = self.field_action_buttons[index]
+        verified = self.is_field_verified(index)
+        button.setText("ยืนยันแล้ว" if verified else "ยืนยัน")
+        button.setObjectName("verifiedEmail" if verified else "verifyEmail")
+        button.setEnabled(bool(text.strip()) and not verified)
+        button.style().unpolish(button)
+        button.style().polish(button)
+        self._update_submit_enabled()
 
     def _clear_field_error(self, index: int) -> None:
         self.field_errors[index].clear()
@@ -604,6 +793,8 @@ class FormDialog(QDialog):
                     if label == wanted:
                         return index
             return None
+        elif "Gmail" in text or "อีเมล" in text:
+            wanted = "Gmail"
         else:
             return None
         for index, label in enumerate(self.field_labels):
@@ -760,6 +951,193 @@ class FaceScanDialog(QDialog):
         self.next_button.setEnabled(False)
 
 
+class OtpDialog(QDialog):
+    code_completed = Signal(str)
+    resend_requested = Signal()
+
+    def __init__(self, masked_email: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("popup")
+        self.setModal(True)
+        self.setMinimumWidth(680)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self._submitting = False
+        self._remaining_seconds = 0
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(42, 34, 42, 32)
+        heading = QLabel("ยืนยันอีเมล")
+        heading.setObjectName("pageTitle")
+        heading.setAlignment(Qt.AlignCenter)
+        description = QLabel(
+            f"กรอกรหัส 6 หลักที่ส่งไปยัง {masked_email}"
+        )
+        description.setAlignment(Qt.AlignCenter)
+        description.setWordWrap(True)
+        layout.addWidget(heading)
+        layout.addSpacing(14)
+        layout.addWidget(description)
+        layout.addSpacing(24)
+
+        code_row = QHBoxLayout()
+        code_row.setSpacing(12)
+        code_row.addStretch()
+        self.code_inputs: list[QLabel] = []
+        for _index in range(6):
+            field = QLabel("")
+            field.setFixedSize(66, 72)
+            field.setAlignment(Qt.AlignCenter)
+            self.code_inputs.append(field)
+            code_row.addWidget(field)
+        code_row.addStretch()
+        layout.addLayout(code_row)
+
+        self.error = QLabel("")
+        self.error.setObjectName("error")
+        self.error.setFixedHeight(22)
+        self.error.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.error)
+        expires = QLabel("รหัสจะหมดอายุใน 10 นาที")
+        expires.setObjectName("muted")
+        expires.setAlignment(Qt.AlignCenter)
+        layout.addWidget(expires)
+        layout.addSpacing(24)
+
+        buttons = QHBoxLayout()
+        cancel = QPushButton("ยกเลิก")
+        cancel.setObjectName("cancel")
+        cancel.setFixedWidth(210)
+        cancel.setFocusPolicy(Qt.NoFocus)
+        self.resend_button = QPushButton("ส่งรหัสอีกครั้ง")
+        self.resend_button.setObjectName("secondaryAction")
+        self.resend_button.setFixedWidth(210)
+        self.resend_button.setFocusPolicy(Qt.NoFocus)
+        cancel.clicked.connect(self.reject)
+        self.resend_button.clicked.connect(self._request_resend)
+        buttons.addStretch()
+        buttons.addWidget(cancel)
+        buttons.addSpacing(72)
+        buttons.addWidget(self.resend_button)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+        self.countdown = QLabel("")
+        self.countdown.setObjectName("muted")
+        self.countdown.setAlignment(Qt.AlignRight)
+        layout.addWidget(self.countdown)
+
+        self.timer = QTimer(self)
+        self.timer.setInterval(1_000)
+        self.timer.timeout.connect(self._tick)
+        self._refresh_code_fields()
+        self.set_sending()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.setFocus(Qt.OtherFocusReason)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if self._submitting:
+            event.accept()
+            return
+        text = event.text()
+        if len(text) == 1 and text in "0123456789":
+            for field in self.code_inputs:
+                if not field.text():
+                    field.setText(text)
+                    break
+            self.error.clear()
+            self._refresh_code_fields()
+            self._submit_if_complete()
+            event.accept()
+            return
+        if event.key() in (Qt.Key_Backspace, Qt.Key_Delete):
+            for field in reversed(self.code_inputs):
+                if field.text():
+                    field.clear()
+                    break
+            self.error.clear()
+            self._refresh_code_fields()
+            event.accept()
+            return
+        event.accept()
+
+    def _submit_if_complete(self) -> None:
+        code = "".join(field.text() for field in self.code_inputs)
+        if len(code) != 6:
+            return
+        self._submitting = True
+        self._refresh_code_fields()
+        self.code_completed.emit(code)
+
+    def _refresh_code_fields(self) -> None:
+        active_index = next(
+            (index for index, field in enumerate(self.code_inputs) if not field.text()),
+            -1,
+        )
+        for index, field in enumerate(self.code_inputs):
+            if self._submitting:
+                border = "#aeb5bd"
+                width = 1
+            elif index == active_index:
+                border = "#168bea"
+                width = 3
+            else:
+                border = "#9ebfe3"
+                width = 1
+            field.setStyleSheet(
+                "background:#ffffff; color:#10243a; border:"
+                f"{width}px solid {border}; border-radius:12px; "
+                "font-size:28px; font-weight:600;"
+            )
+
+    def reset_code(self, message: str) -> None:
+        self._submitting = False
+        for field in self.code_inputs:
+            field.clear()
+        self.error.setText(message)
+        self._refresh_code_fields()
+        self.setFocus(Qt.OtherFocusReason)
+
+    def set_sending(self) -> None:
+        self.resend_button.setEnabled(False)
+        self.resend_button.setText("กำลังส่งรหัส...")
+        self.countdown.clear()
+
+    def start_resend_cooldown(self, seconds: int = 60) -> None:
+        self._remaining_seconds = seconds
+        self.resend_button.setText("ส่งรหัสอีกครั้ง")
+        self.resend_button.setEnabled(False)
+        self._update_countdown()
+        self.timer.start()
+        self.setFocus(Qt.OtherFocusReason)
+
+    def show_send_error(self, message: str) -> None:
+        self.timer.stop()
+        self._remaining_seconds = 0
+        self.resend_button.setText("ส่งรหัสอีกครั้ง")
+        self.resend_button.setEnabled(True)
+        self.countdown.clear()
+        self.error.setText(message)
+
+    def _request_resend(self) -> None:
+        self.set_sending()
+        self.resend_requested.emit()
+
+    def _tick(self) -> None:
+        self._remaining_seconds -= 1
+        if self._remaining_seconds <= 0:
+            self.timer.stop()
+            self.resend_button.setEnabled(True)
+            self.countdown.clear()
+            return
+        self._update_countdown()
+
+    def _update_countdown(self) -> None:
+        self.countdown.setText(
+            f"ส่งได้อีกครั้งใน {self._remaining_seconds} วินาที"
+        )
+
+
 class NoticeDialog(QDialog):
     def __init__(self, title: str, message: str, parent=None, error: bool = False):
         super().__init__(parent)
@@ -794,12 +1172,14 @@ class ChatPage(QWidget):
     manual_mic_requested = Signal(bool)
     stop_requested = Signal()
     attachment_requested = Signal(str)
+    permission_mode_changed = Signal(str)
 
     def __init__(self):
         super().__init__()
         self._busy = False
         self._manual_recording = False
         self._voice_mode = "normal"
+        self._permission_mode = "ask"
         self._input_attachments: dict[str, AttachmentTile] = {}
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 12)
@@ -922,6 +1302,11 @@ class ChatPage(QWidget):
         self.folder_button.setIconSize(QSize(24, 24))
         self.folder_button.setMinimumWidth(176)
         self.folder_button.clicked.connect(self.folder_requested)
+        self.permission_mode_button = PermissionModeButton("ขออนุมัติ")
+        self.permission_mode_button.setToolTip("เลือกรูปแบบการอนุมัติคำสั่งของ Admin")
+        self.permission_mode_button.clicked.connect(
+            self._show_permission_mode_menu
+        )
         self.remove_folder_button = QPushButton()
         self.remove_folder_button.setObjectName("removeFolder")
         self.remove_folder_button.setFixedSize(42, 42)
@@ -952,6 +1337,7 @@ class ChatPage(QWidget):
         self.send_button.clicked.connect(self._primary_action)
         folder_row.addWidget(self.folder_button)
         folder_row.addWidget(self.remove_folder_button)
+        folder_row.addWidget(self.permission_mode_button)
         folder_row.addStretch()
         input_row.addWidget(self.input, 1)
         input_row.addWidget(self.mic_button)
@@ -972,6 +1358,33 @@ class ChatPage(QWidget):
             self.stop_requested.emit()
         else:
             self._submit()
+
+    def _show_permission_mode_menu(self) -> None:
+        menu = QMenu(self)
+        choices = (
+            ("ขออนุมัติ", "ask"),
+            ("อนุมัติแทนฉัน", "auto"),
+        )
+        for label, mode in choices:
+            action = menu.addAction(label)
+            if mode == self._permission_mode:
+                action.setIcon(make_menu_icon("check", "#43e78f"))
+            else:
+                blank_icon = QPixmap(22, 22)
+                blank_icon.fill(Qt.transparent)
+                action.setIcon(QIcon(blank_icon))
+            action.triggered.connect(
+                lambda _checked=False, selected=mode: self.set_permission_mode(
+                    selected,
+                    emit=True,
+                )
+            )
+        menu.ensurePolished()
+        position = self.permission_mode_button.mapToGlobal(
+            self.permission_mode_button.rect().topLeft()
+        )
+        position.setY(position.y() - menu.sizeHint().height() - 6)
+        menu.exec(position)
 
     def _toggle_manual_mic(self) -> None:
         if not self.mic_button.isEnabled() or self._busy:
@@ -1239,6 +1652,7 @@ class ChatPage(QWidget):
     def set_busy(self, busy: bool, status: str = "AI กำลังประมวลผล") -> None:
         self._busy = busy
         self.input.setEnabled(not busy)
+        self.permission_mode_button.setEnabled(not busy)
         self.mic_button.setEnabled(
             not busy
             and self._voice_mode == "normal"
@@ -1305,6 +1719,16 @@ class ChatPage(QWidget):
             self.folder_button.setText("\u00a0\u00a0เลือกโฟลเดอร์")
             self.folder_button.setToolTip("")
             self.remove_folder_button.setVisible(False)
+
+    def set_permission_mode(self, mode: str, emit: bool = False) -> None:
+        if mode not in {"ask", "auto"}:
+            raise ValueError("Unsupported permission mode")
+        changed = mode != self._permission_mode
+        self._permission_mode = mode
+        label = "ขออนุมัติ" if mode == "ask" else "อนุมัติแทนฉัน"
+        self.permission_mode_button.set_label(label)
+        if emit and changed:
+            self.permission_mode_changed.emit(mode)
 
     def clear_messages(self) -> None:
         self.input.clear()

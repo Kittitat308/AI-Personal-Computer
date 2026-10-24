@@ -98,3 +98,9 @@ class AdminResult(BaseModel):
             raise ValueError("response must not be blank")
 
         return value
+
+
+class ConfirmationResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["allow", "deny", "unclear"]

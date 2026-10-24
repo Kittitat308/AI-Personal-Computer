@@ -2,6 +2,7 @@ import asyncio
 
 from core.chat import ChatAI
 from core.admin import AdminAI
+from core.confirmation import ConfirmationAI
 from core.schemas import AdminResult, ChatResult, WorkerResult
 from core.skill_registry import SkillRegistry
 from core.worker import WorkerAI
@@ -13,8 +14,15 @@ class Controller:
         self.chat = ChatAI(self.registry.catalog())
         self.worker = WorkerAI(self.registry)
         self.admin = AdminAI()
+        self.confirmation = ConfirmationAI()
+        self.admin_permission_mode = "ask"
         self.pending_execution_result = None
         self.lock = asyncio.Lock()
+
+    def set_admin_permission_mode(self, mode: str) -> None:
+        if mode not in {"ask", "auto"}:
+            raise ValueError("Admin permission mode must be 'ask' or 'auto'")
+        self.admin_permission_mode = mode
 
     @property
     def awaiting_user_input(self) -> bool:
@@ -55,6 +63,10 @@ class Controller:
                 chat_result.task,
                 progress_callback=progress_callback,
             )
+            result = await self._resolve_admin_permissions(
+                result,
+                progress_callback,
+            )
         else:
             result = await self.worker.execute(chat_result.task)
         self.chat.record_worker_result(result.response)
@@ -70,9 +82,42 @@ class Controller:
         progress_callback=None,
     ) -> WorkerResult | AdminResult:
         if self.admin.awaiting_user_input:
-            result = await self.admin.continue_with_user_input(
-                user_message,
-                progress_callback=progress_callback,
+            if self.admin.pending_permission is not None:
+                if self.admin_permission_mode == "auto":
+                    result = await self.admin.continue_with_user_input(
+                        "อนุญาต",
+                        progress_callback=progress_callback,
+                    )
+                else:
+                    permission_question = self.admin._permission_question(
+                        self.admin.pending_permission
+                    )
+                    try:
+                        decision = await self.confirmation.classify(
+                            permission_question,
+                            user_message,
+                        )
+                    except Exception as error:
+                        print(f"CONFIRMATION ERROR: {error}")
+                        decision = "unclear"
+                    if decision == "unclear":
+                        result = AdminResult(
+                            status="needs_input",
+                            response="กรุณาตอบว่าอนุญาตหรือไม่อนุญาตครับ",
+                        )
+                    else:
+                        result = await self.admin.continue_with_user_input(
+                            "อนุญาต" if decision == "allow" else "ไม่อนุญาต",
+                            progress_callback=progress_callback,
+                        )
+            else:
+                result = await self.admin.continue_with_user_input(
+                    user_message,
+                    progress_callback=progress_callback,
+                )
+            result = await self._resolve_admin_permissions(
+                result,
+                progress_callback,
             )
         else:
             result = await self.worker.continue_with_user_input(user_message)
@@ -81,6 +126,22 @@ class Controller:
         if result.status != "needs_input":
             self.pending_execution_result = result.response
 
+        return result
+
+    async def _resolve_admin_permissions(
+        self,
+        result: AdminResult,
+        progress_callback=None,
+    ) -> AdminResult:
+        while (
+            self.admin_permission_mode == "auto"
+            and result.status == "needs_input"
+            and self.admin.pending_permission is not None
+        ):
+            result = await self.admin.continue_with_user_input(
+                "อนุญาต",
+                progress_callback=progress_callback,
+            )
         return result
 
     async def rotate_chat_if_ready(self) -> bool:
@@ -93,6 +154,7 @@ class Controller:
         async with self.lock:
             await asyncio.gather(self.worker.close(), self.admin.close())
             await self.chat.reset(start=start)
+            self.admin_permission_mode = "ask"
             self.pending_execution_result = None
 
     async def cancel_pending_task(self) -> None:
