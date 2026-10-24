@@ -81,3 +81,20 @@ class WorkerResult(BaseModel):
             raise ValueError("response must not be blank")
 
         return value
+
+
+class AdminResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["completed", "needs_input", "failed", "cancelled"]
+    response: str = Field(min_length=1)
+
+    @field_validator("response")
+    @classmethod
+    def normalize_response(cls, value: str) -> str:
+        value = value.strip()
+
+        if not value:
+            raise ValueError("response must not be blank")
+
+        return value

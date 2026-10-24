@@ -8,6 +8,7 @@ openwakeword==0.6.0
 playwright==1.64.0
 pynput==1.8.1
 pydantic==2.14.1
+pypdf==6.21.2
 python-dotenv==1.2.1
 requests==2.34.2
 sounddevice==0.5.6

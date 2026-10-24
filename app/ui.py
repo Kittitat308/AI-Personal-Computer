@@ -2,7 +2,7 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
     QFontMetrics,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -47,6 +48,10 @@ QFrame#sidebar { background: #030d1a; border: none; }
 QFrame#deviceCard { background: #071527; border: 1px solid #145f9f; border-radius: 14px; }
 QFrame#attachmentCard { background: #0b2637; border: 1px solid #16a79e; border-radius: 16px; }
 QFrame#attachmentCard:hover { background: #10374d; border-color: #2ad5ca; }
+QFrame#attachmentTile { background: #10243a; border: 1px solid #526f91; border-radius: 12px; }
+QFrame#attachmentTile:hover { border-color: #2298ff; }
+QPushButton#attachmentRemove { background: #ff4d5b; border: 1px solid #ff7a85; border-radius: 9px; padding: 0px; }
+QPushButton#attachmentRemove:hover { background: #b82837; border-color: #ff8993; }
 QLabel#deviceIcon { color: #eef7ff; font-size: 23px; font-weight: 700; }
 QLabel#activityStatus { color: #dbe9f8; padding: 2px 12px; }
 QLabel#title { font-size: 30px; font-weight: 700; }
@@ -256,6 +261,47 @@ class AttachmentCard(QFrame):
 
 class MessageInput(QPlainTextEdit):
     submit_requested = Signal()
+    attachments_added = Signal(object)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def insertFromMimeData(self, source) -> None:
+        local_urls = [url for url in source.urls() if url.isLocalFile()]
+        paths = [
+            url.toLocalFile()
+            for url in local_urls
+            if Path(url.toLocalFile()).is_file()
+        ]
+        if local_urls:
+            if paths:
+                self.attachments_added.emit(paths)
+            return
+        if not paths and source.hasText():
+            candidate_urls = [
+                value.strip()
+                for value in source.text().splitlines()
+                if value.strip().lower().startswith("file:///")
+            ]
+            local_targets = [
+                Path(url.toLocalFile())
+                for url in map(QUrl, candidate_urls)
+                if url.isLocalFile()
+            ]
+            paths = [
+                str(path)
+                for path in local_targets
+                if path.is_file()
+            ]
+            if local_targets:
+                if paths:
+                    self.attachments_added.emit(paths)
+                return
+        if paths:
+            self.attachments_added.emit(paths)
+            return
+        super().insertFromMimeData(source)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if (
@@ -266,6 +312,78 @@ class MessageInput(QPlainTextEdit):
             self.submit_requested.emit()
             return
         super().keyPressEvent(event)
+
+
+class AttachmentTile(QFrame):
+    removed = Signal(str)
+
+    IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+
+    def __init__(self, path: Path, parent=None, removable: bool = True) -> None:
+        super().__init__(parent)
+        self.path = path.resolve()
+        self.setObjectName("attachmentTile")
+        self.setFixedSize(64, 64)
+        self.setToolTip(str(self.path))
+
+        layout = QGridLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(0)
+
+        preview = QLabel()
+        preview.setAlignment(Qt.AlignCenter)
+        preview.setAttribute(Qt.WA_TransparentForMouseEvents)
+        preview.setFixedSize(54, 54)
+        if self.path.suffix.lower() in self.IMAGE_SUFFIXES:
+            pixmap = QPixmap(str(self.path))
+            if not pixmap.isNull():
+                preview.setPixmap(
+                    pixmap.scaled(
+                        50,
+                        50,
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation,
+                    )
+                )
+        else:
+            preview.setPixmap(make_icon("document", 22, "#eef7ff").pixmap(22, 22))
+            filename = QLabel(self._compact_filename(self.path, 54))
+            filename.setAlignment(Qt.AlignCenter)
+            filename.setStyleSheet(
+                "color:#dbe9f8;font-size:7px;font-weight:600;background:transparent;"
+            )
+            filename.setAttribute(Qt.WA_TransparentForMouseEvents)
+            layout.addWidget(filename, 0, 0, alignment=Qt.AlignHCenter | Qt.AlignBottom)
+
+        layout.addWidget(preview, 0, 0)
+        if removable:
+            remove_button = QPushButton()
+            remove_button.setObjectName("attachmentRemove")
+            remove_button.setIcon(make_icon("close", 8, "#ffffff"))
+            remove_button.setIconSize(QSize(8, 8))
+            remove_button.setFixedSize(18, 18)
+            remove_button.setToolTip("นำไฟล์ออก")
+            remove_button.clicked.connect(lambda: self.removed.emit(str(self.path)))
+            layout.addWidget(
+                remove_button,
+                0,
+                0,
+                alignment=Qt.AlignTop | Qt.AlignRight,
+            )
+
+    @staticmethod
+    def _compact_filename(path: Path, width: int) -> str:
+        suffix = path.suffix
+        compact_suffix = suffix.lstrip(".")
+        stem = path.stem
+        full_name = path.name
+        max_characters = max(8, width // 6)
+        if len(full_name) <= max_characters:
+            return full_name
+        stem_length = max(1, max_characters - len(suffix))
+        if stem:
+            return f"{stem[:stem_length]}{suffix}"
+        return f".{compact_suffix}" if suffix else "..."
 
 
 class ToggleSwitch(QAbstractButton):
@@ -667,7 +785,7 @@ class NoticeDialog(QDialog):
 
 
 class ChatPage(QWidget):
-    message_submitted = Signal(str)
+    message_submitted = Signal(str, object)
     folder_requested = Signal()
     folder_cleared = Signal()
     profile_requested = Signal(object)
@@ -682,6 +800,7 @@ class ChatPage(QWidget):
         self._busy = False
         self._manual_recording = False
         self._voice_mode = "normal"
+        self._input_attachments: dict[str, AttachmentTile] = {}
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 12)
         top = QFrame()
@@ -782,6 +901,18 @@ class ChatPage(QWidget):
         composer_layout = QVBoxLayout(composer)
         composer_layout.setContentsMargins(12, 10, 12, 10)
         composer_layout.setSpacing(8)
+        self.attachment_scroll = QScrollArea()
+        self.attachment_scroll.setWidgetResizable(True)
+        self.attachment_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.attachment_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.attachment_scroll.setFixedHeight(74)
+        self.attachment_scroll.setVisible(False)
+        self.attachment_container = QWidget()
+        self.attachment_layout = QHBoxLayout(self.attachment_container)
+        self.attachment_layout.setContentsMargins(0, 0, 0, 0)
+        self.attachment_layout.setSpacing(8)
+        self.attachment_layout.addStretch()
+        self.attachment_scroll.setWidget(self.attachment_container)
         folder_row = QHBoxLayout()
         folder_row.setSpacing(10)
         input_row = QHBoxLayout()
@@ -806,6 +937,7 @@ class ChatPage(QWidget):
         self.input.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.input.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.input.submit_requested.connect(self._submit)
+        self.input.attachments_added.connect(self.add_input_attachments)
         self.input.textChanged.connect(self._update_send_enabled)
         self.mic_button = QPushButton("●")
         self.mic_button.setObjectName("micButton")
@@ -824,6 +956,7 @@ class ChatPage(QWidget):
         input_row.addWidget(self.input, 1)
         input_row.addWidget(self.mic_button)
         input_row.addWidget(self.send_button)
+        composer_layout.addWidget(self.attachment_scroll)
         composer_layout.addLayout(folder_row)
         composer_layout.addLayout(input_row)
         self.activity_status = QLabel("")
@@ -847,15 +980,49 @@ class ChatPage(QWidget):
 
     def _submit(self) -> None:
         text = self.input.toPlainText().strip()
-        if text:
+        attachments = list(self._input_attachments)
+        if text or attachments:
             self.input.clear()
-            self.message_submitted.emit(text)
+            self.clear_input_attachments()
+            self.message_submitted.emit(text, attachments)
 
     def _update_send_enabled(self) -> None:
         if not self._busy:
             self.send_button.setEnabled(
-                self.input.isEnabled() and bool(self.input.toPlainText().strip())
+                self.input.isEnabled()
+                and bool(self.input.toPlainText().strip() or self._input_attachments)
             )
+
+    def add_input_attachments(self, paths: list[str]) -> None:
+        for raw_path in paths:
+            path = Path(raw_path).resolve()
+            key = str(path)
+            if not path.is_file() or key in self._input_attachments:
+                continue
+            tile = AttachmentTile(path)
+            tile.removed.connect(self.remove_input_attachment)
+            self._input_attachments[key] = tile
+            self.attachment_layout.insertWidget(
+                self.attachment_layout.count() - 1,
+                tile,
+            )
+        self.attachment_scroll.setVisible(bool(self._input_attachments))
+        self._update_send_enabled()
+
+    def remove_input_attachment(self, path: str) -> None:
+        tile = self._input_attachments.pop(path, None)
+        if tile is not None:
+            tile.deleteLater()
+        self.attachment_scroll.setVisible(bool(self._input_attachments))
+        self._update_send_enabled()
+
+    def clear_input_attachments(self) -> None:
+        tiles = list(self._input_attachments.values())
+        self._input_attachments.clear()
+        for tile in tiles:
+            tile.deleteLater()
+        self.attachment_scroll.setVisible(False)
+        self._update_send_enabled()
 
     def append_transcript(self, text: str) -> None:
         cleaned = text.strip()
@@ -902,6 +1069,37 @@ class ChatPage(QWidget):
             row.addWidget(message)
             row.addStretch()
         self.messages_layout.insertLayout(self.messages_layout.count() - 1, row)
+        self.messages_layout.activate()
+        self.messages.adjustSize()
+        self._schedule_scroll_to_bottom(message)
+
+    def add_user_attachments(self, paths: list[Path]) -> None:
+        valid_paths = [path.resolve() for path in paths if path.is_file()]
+        if not valid_paths:
+            return
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addStretch()
+        for path in valid_paths:
+            row.addWidget(AttachmentTile(path, removable=False))
+
+        message = QWidget()
+        message_layout = QVBoxLayout(message)
+        message_layout.setContentsMargins(0, 0, 0, 0)
+        message_layout.setSpacing(4)
+        message_layout.addLayout(row)
+        timestamp = QLabel(datetime.now().strftime("%H:%M"))
+        timestamp.setStyleSheet("color:#7890ad;font-size:12px;")
+        message_layout.addWidget(timestamp, alignment=Qt.AlignRight)
+
+        outer_row = QHBoxLayout()
+        outer_row.addStretch()
+        outer_row.addWidget(message)
+        self.messages_layout.insertLayout(
+            self.messages_layout.count() - 1,
+            outer_row,
+        )
         self.messages_layout.activate()
         self.messages.adjustSize()
         self._schedule_scroll_to_bottom(message)
@@ -1109,6 +1307,8 @@ class ChatPage(QWidget):
             self.remove_folder_button.setVisible(False)
 
     def clear_messages(self) -> None:
+        self.input.clear()
+        self.clear_input_attachments()
         while self.messages_layout.count() > 1:
             item = self.messages_layout.takeAt(0)
             child_layout = item.layout()

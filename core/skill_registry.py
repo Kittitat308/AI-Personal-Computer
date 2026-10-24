@@ -250,6 +250,19 @@ class SkillRegistry:
             slash_command="pdf",
             working_directory=PROJECT_ROOT / "documents",
         )
+        admin = SkillDefinition(
+            skill_id="admin",
+            description=(
+                "จัดการ ตั้งค่า ตรวจสอบ วินิจฉัย และเปลี่ยนแปลงระบบปฏิบัติการหรือ"
+                "โปรแกรมที่ติดตั้ง เช่น ติดตั้ง อัปเดต ซ่อมแซม ตั้งค่า หรือถอนโปรแกรม "
+                "ตรวจสอบฮาร์ดแวร์ พื้นที่จัดเก็บ หน่วยความจำ โปรเซส บริการ เครือข่าย "
+                "และบันทึกระบบ รวมถึงเรียกใช้คำสั่งหรือสคริปต์เบื้องหลัง ใช้เมื่อคำขอ"
+                "ต้องเข้าถึงระบบโดยตรงและไม่มี Skill เฉพาะรองรับ และอย่าใช้ร่วมกับ "
+                "Skill อื่นในงานเดียวกัน"
+            ),
+            directory=None,
+            tool_names=(),
+        )
         self.definitions = {
             browser.skill_id: browser,
             gmail.skill_id: gmail,
@@ -260,6 +273,7 @@ class SkillRegistry:
             xlsx.skill_id: xlsx,
             pptx.skill_id: pptx,
             pdf.skill_id: pdf,
+            admin.skill_id: admin,
         }
         self.runtimes = {
             skill_id: SkillRuntime(definition)

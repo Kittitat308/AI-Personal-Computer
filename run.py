@@ -14,6 +14,10 @@ async def main() -> None:
     audio_queue = AudioQueue()
     wakeword = WakeWordService()
 
+    def show_admin_progress(message: str) -> None:
+        print(f"\nADMIN PROGRESS:\n{message}")
+        audio_queue.enqueue(message)
+
     try:
         await asyncio.gather(
             controller.start(),
@@ -55,7 +59,10 @@ async def main() -> None:
 
             try:
                 if controller.awaiting_user_input:
-                    worker_result = await controller.continue_task(message)
+                    worker_result = await controller.continue_task(
+                        message,
+                        progress_callback=show_admin_progress,
+                    )
                     print(f"\nWORKER:\n{worker_result.response}")
                     audio_queue.enqueue(worker_result.response)
                 else:
@@ -64,7 +71,10 @@ async def main() -> None:
                     print(f"\nAI:\n{chat_result.response}")
                     audio_queue.enqueue(chat_result.response)
 
-                    worker_result = await controller.execute_task(chat_result)
+                    worker_result = await controller.execute_task(
+                        chat_result,
+                        progress_callback=show_admin_progress,
+                    )
 
                     if worker_result is not None:
                         print(f"\nWORKER:\n{worker_result.response}")

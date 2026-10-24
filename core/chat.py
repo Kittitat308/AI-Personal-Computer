@@ -1,7 +1,9 @@
 import json
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 
+from core.attachments import build_user_content
 from core.claude_cli import ClaudeSession
 from core.config import (
     CHAT_RECENT_TURNS_TO_KEEP,
@@ -97,6 +99,7 @@ class ChatAI:
         self,
         user_message: str,
         previous_execution_result: str | None = None,
+        attachments: list[Path] | None = None,
     ) -> ChatResult:
         await self.start()
         prompt = user_message.strip()
@@ -109,8 +112,15 @@ class ChatAI:
                 + prompt
             )
 
+        attachment_paths = attachments or []
+        message_content = (
+            build_user_content(prompt, attachment_paths)
+            if attachment_paths
+            else prompt
+        )
+
         try:
-            response = await self.session.generate(prompt)
+            response = await self.session.generate(message_content)
         except asyncio.CancelledError:
             session = self.session
             self.session = None
@@ -118,8 +128,12 @@ class ChatAI:
                 await session.abort()
             raise
         chat_result = self._parse_result(response.structured_output, response.text)
+        history_message = user_message.strip()
+        if attachment_paths:
+            filenames = ", ".join(path.name for path in attachment_paths)
+            history_message += f" [ไฟล์แนบ: {filenames}]"
         self.history.append(
-            ConversationTurn(user=user_message.strip(), assistant=chat_result.response)
+            ConversationTurn(user=history_message, assistant=chat_result.response)
         )
         self.turn_count += 1
         return chat_result

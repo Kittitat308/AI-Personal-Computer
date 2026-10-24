@@ -37,6 +37,11 @@ class ThreadBridge(QObject):
 
 class DesktopApplication:
     ATTACHMENT_SUFFIXES = {".docx", ".pdf", ".pptx", ".xlsx"}
+    INPUT_ATTACHMENT_SUFFIXES = ATTACHMENT_SUFFIXES | {
+        ".png", ".jpg", ".jpeg", ".webp", ".gif",
+        ".txt", ".md", ".csv", ".json", ".py", ".html", ".xml",
+    }
+    MAX_INPUT_ATTACHMENT_SIZE = 25 * 1024 * 1024
 
     def __init__(self, project_root: Path):
         self.project_root = project_root
@@ -44,6 +49,7 @@ class DesktopApplication:
         self.database = Database(project_root / "data" / "ai_personal_computer.db")
         self.attachment_cache = tempfile.TemporaryDirectory(prefix="ai_pc_attachments_")
         self.attachment_cache_path = Path(self.attachment_cache.name).resolve()
+        self.input_attachment_cache: tempfile.TemporaryDirectory | None = None
         self.face = FaceService(self.database)
         self.controller = GUIController()
         self.stt = GUISTTService()
@@ -260,6 +266,10 @@ class DesktopApplication:
             errors.append(str(error))
         try:
             self.attachment_cache.cleanup()
+        except Exception as error:
+            errors.append(str(error))
+        try:
+            self._reset_input_attachment_cache()
         except Exception as error:
             errors.append(str(error))
         self.closed = True
@@ -835,12 +845,15 @@ class DesktopApplication:
                 self.resume_wakeword_after_push = False
                 self.current_operation = None
                 self._reset_attachment_cache()
+                self._reset_input_attachment_cache()
                 self._refresh_settings()
 
-    def _on_typed_message(self, text: str) -> None:
+    def _on_typed_message(self, text: str, attachments: list[str]) -> None:
         if self.current_operation is not None and not self.current_operation.done():
             return
-        self.current_operation = asyncio.create_task(self.process_message(text))
+        self.current_operation = asyncio.create_task(
+            self.process_message(text, attachments=attachments)
+        )
         self.current_operation.add_done_callback(self._operation_finished)
 
     def _on_utterance(self, audio) -> None:
@@ -876,25 +889,66 @@ class DesktopApplication:
             if failed and not self.operation_canceling:
                 self.window.chat.show_activity_error("แปลงเสียงเป็นข้อความล้มเหลว")
 
-    async def process_message(self, text: str, busy_already: bool = False) -> None:
+    async def process_message(
+        self,
+        text: str,
+        busy_already: bool = False,
+        attachments: list[str] | None = None,
+    ) -> None:
         if self.state.assistant_busy and not busy_already:
             return
         self.state.assistant_busy = True
         self.window.chat.set_busy(True, "AI กำลังประมวลผล")
-        self.window.chat.add_message(text, "user")
+        source_attachments: list[Path] = []
+        staged_attachments: list[Path] = []
+        if text:
+            self.window.chat.add_message(text, "user")
         try:
+            source_attachments = self._validate_input_attachments(attachments or [])
+            self.window.chat.add_user_attachments(source_attachments)
+            if not self.controller.awaiting_user_input:
+                self._reset_input_attachment_cache()
+                self.input_attachment_cache = tempfile.TemporaryDirectory(
+                    prefix="ai_pc_input_attachments_"
+                )
+            if self.input_attachment_cache is not None:
+                staged_attachments = self._stage_input_attachments(
+                    source_attachments,
+                    Path(self.input_attachment_cache.name).resolve(),
+                )
+            effective_text = text.strip() or "โปรดตรวจสอบไฟล์ที่แนบมา"
             if self.controller.awaiting_user_input:
                 documents_before = self._document_snapshot()
-                worker = await self.controller.continue_task(text)
+                worker = await self.controller.continue_task(
+                    self._message_with_attachment_paths(
+                        effective_text,
+                        staged_attachments,
+                    ),
+                    progress_callback=self._show_admin_progress,
+                )
                 self.window.chat.add_message(worker.response, "result")
                 self._show_created_documents(documents_before, worker.status)
                 self._speak(worker.response)
             else:
-                chat = await self.controller.generate_chat(text)
+                chat = await self.controller.generate_chat(
+                    effective_text,
+                    attachments=staged_attachments,
+                )
                 self.window.chat.add_message(chat.response, "assistant")
                 self._speak(chat.response)
                 documents_before = self._document_snapshot()
-                worker = await self.controller.execute_task(chat)
+                self.controller.set_temporary_attachment_directory(
+                    Path(self.input_attachment_cache.name)
+                    if (
+                        chat.type == "task"
+                        and self.input_attachment_cache is not None
+                    )
+                    else None
+                )
+                worker = await self.controller.execute_task(
+                    chat,
+                    progress_callback=self._show_admin_progress,
+                )
                 if worker is not None:
                     self.window.chat.add_message(worker.response, "result")
                     self._show_created_documents(documents_before, worker.status)
@@ -906,9 +960,56 @@ class DesktopApplication:
         except Exception as error:
             self._show_error(f"เกิดข้อผิดพลาด: {error}")
         finally:
+            if not self.controller.awaiting_user_input:
+                self._reset_input_attachment_cache()
             if not self.operation_canceling:
                 self.state.assistant_busy = False
                 self.window.chat.set_busy(False)
+
+    def _validate_input_attachments(self, paths: list[str]) -> list[Path]:
+        validated: list[Path] = []
+        for raw_path in paths:
+            path = Path(raw_path).resolve()
+            if (
+                not path.is_file()
+                or path.is_symlink()
+                or path.suffix.lower() not in self.INPUT_ATTACHMENT_SUFFIXES
+            ):
+                raise ValueError(f"ไม่รองรับไฟล์ {path.name}")
+            if path.stat().st_size > self.MAX_INPUT_ATTACHMENT_SIZE:
+                raise ValueError(f"ไฟล์ {path.name} มีขนาดเกิน 25 MB")
+            validated.append(path)
+        return validated
+
+    @staticmethod
+    def _stage_input_attachments(paths: list[Path], directory: Path) -> list[Path]:
+        staged: list[Path] = []
+        directory.mkdir(parents=True, exist_ok=True)
+        for source in paths:
+            destination = directory / source.name
+            counter = 2
+            while destination.exists():
+                destination = directory / f"{source.stem}_{counter}{source.suffix}"
+                counter += 1
+            shutil.copy2(source, destination)
+            staged.append(destination.resolve())
+        return staged
+
+    def _reset_input_attachment_cache(self) -> None:
+        if self.input_attachment_cache is not None:
+            self.input_attachment_cache.cleanup()
+            self.input_attachment_cache = None
+
+    @staticmethod
+    def _message_with_attachment_paths(text: str, paths: list[Path]) -> str:
+        if not paths:
+            return text
+        attached = "\n".join(f"- {path}" for path in paths)
+        return f"{text}\n\nไฟล์ที่ผู้ใช้แนบมา:\n{attached}"
+
+    def _show_admin_progress(self, message: str) -> None:
+        self.window.chat.add_message(message, "result")
+        self._speak(message)
 
     def _document_snapshot(self) -> dict[Path, tuple[int, int]]:
         documents = (self.project_root / "documents").resolve()

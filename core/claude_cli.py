@@ -1,6 +1,11 @@
 import asyncio
+import contextlib
+import inspect
 import json
+import os
+import signal
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,9 +18,15 @@ class ClaudeResponse:
 
 
 class ClaudeSession:
-    def __init__(self, arguments: list[str], cwd: Path):
+    def __init__(
+        self,
+        arguments: list[str],
+        cwd: Path,
+        isolated_process_group: bool = False,
+    ):
         self.arguments = arguments
         self.cwd = cwd
+        self.isolated_process_group = isolated_process_group
         self.process = None
         self.lock = asyncio.Lock()
         self.shutdown_lock = asyncio.Lock()
@@ -31,6 +42,13 @@ class ClaudeSession:
         if executable is None:
             raise RuntimeError("ไม่พบ Claude CLI ใน PATH")
 
+        process_options = {}
+        if self.isolated_process_group:
+            if os.name == "nt":
+                process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                process_options["start_new_session"] = True
+
         self.process = await asyncio.create_subprocess_exec(
             executable,
             *self.arguments,
@@ -38,6 +56,7 @@ class ClaudeSession:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **process_options,
         )
         self.stderr_task = asyncio.create_task(self._read_stderr())
 
@@ -54,10 +73,19 @@ class ClaudeSession:
                 self.stderr_lines.append(message)
                 self.stderr_lines = self.stderr_lines[-20:]
 
-    async def generate(self, message: str) -> ClaudeResponse:
-        message = str(message).strip()
-
-        if not message:
+    async def generate(
+        self,
+        message: str | list[dict],
+        on_assistant_text=None,
+        on_permission_request=None,
+    ) -> ClaudeResponse:
+        if isinstance(message, str):
+            content: str | list[dict] = message.strip()
+            if not content:
+                raise ValueError("ข้อความต้องไม่ว่าง")
+        elif isinstance(message, list) and message:
+            content = message
+        else:
             raise ValueError("ข้อความต้องไม่ว่าง")
 
         await self.start()
@@ -68,7 +96,7 @@ class ClaudeSession:
 
             request = {
                 "type": "user",
-                "message": {"role": "user", "content": message},
+                "message": {"role": "user", "content": content},
                 "parent_tool_use_id": None,
                 "session_id": "",
             }
@@ -89,6 +117,16 @@ class ClaudeSession:
                 except json.JSONDecodeError:
                     continue
 
+                if (
+                    event.get("type") == "control_request"
+                    and event.get("request", {}).get("subtype") == "can_use_tool"
+                    and on_permission_request is not None
+                ):
+                    callback_result = on_permission_request(event)
+                    if inspect.isawaitable(callback_result):
+                        await callback_result
+                    continue
+
                 if event.get("type") == "assistant":
                     content = event.get("message", {}).get("content", [])
                     current_text = "".join(
@@ -97,6 +135,10 @@ class ClaudeSession:
                         if item.get("type") == "text"
                     ).strip()
                     assistant_text = current_text or assistant_text
+                    if current_text and on_assistant_text is not None:
+                        callback_result = on_assistant_text(current_text)
+                        if inspect.isawaitable(callback_result):
+                            await callback_result
 
                 if event.get("type") != "result":
                     continue
@@ -113,6 +155,41 @@ class ClaudeSession:
                     text=result_text.strip() or assistant_text,
                     structured_output=event.get("structured_output"),
                 )
+
+    async def respond_to_permission(
+        self,
+        request_id: str,
+        tool_input: dict,
+        allow: bool,
+    ) -> None:
+        if self.process is None or self.process.returncode is not None:
+            raise RuntimeError(self._process_error())
+
+        decision = (
+            {
+                "behavior": "allow",
+                "updatedInput": tool_input,
+                "decisionClassification": "user_temporary",
+            }
+            if allow
+            else {
+                "behavior": "deny",
+                "message": "ผู้ใช้ไม่อนุญาตให้ดำเนินการนี้",
+                "decisionClassification": "user_reject",
+            }
+        )
+        payload = {
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request_id,
+                "response": decision,
+            },
+        }
+        self.process.stdin.write(
+            (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+        )
+        await self.process.stdin.drain()
 
     def _process_error(self) -> str:
         if self.stderr_lines:
@@ -157,7 +234,7 @@ class ClaudeSession:
             if process is None:
                 return
             if process.returncode is None:
-                process.kill()
+                await self._kill_process_tree(process)
             try:
                 await asyncio.wait_for(process.wait(), timeout=3)
             except asyncio.TimeoutError:
@@ -170,3 +247,27 @@ class ClaudeSession:
                     pass
             self.process = None
             self.stderr_task = None
+
+    async def _kill_process_tree(self, process) -> None:
+        if not self.isolated_process_group:
+            process.kill()
+            return
+
+        if os.name == "nt":
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill",
+                "/PID",
+                str(process.pid),
+                "/T",
+                "/F",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await killer.wait()
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+            return
+
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)

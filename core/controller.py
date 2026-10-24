@@ -1,7 +1,8 @@
 import asyncio
 
 from core.chat import ChatAI
-from core.schemas import ChatResult, WorkerResult
+from core.admin import AdminAI
+from core.schemas import AdminResult, ChatResult, WorkerResult
 from core.skill_registry import SkillRegistry
 from core.worker import WorkerAI
 
@@ -11,17 +12,22 @@ class Controller:
         self.registry = SkillRegistry()
         self.chat = ChatAI(self.registry.catalog())
         self.worker = WorkerAI(self.registry)
+        self.admin = AdminAI()
         self.pending_execution_result = None
         self.lock = asyncio.Lock()
 
     @property
     def awaiting_user_input(self) -> bool:
-        return self.worker.awaiting_user_input
+        return self.worker.awaiting_user_input or self.admin.awaiting_user_input
 
     async def start(self) -> None:
         await self.chat.start()
 
-    async def generate_chat(self, user_message: str) -> ChatResult:
+    async def generate_chat(
+        self,
+        user_message: str,
+        attachments=None,
+    ) -> ChatResult:
         if self.awaiting_user_input:
             raise RuntimeError("Worker is waiting for user input")
 
@@ -29,17 +35,28 @@ class Controller:
             result = await self.chat.generate(
                 user_message,
                 previous_execution_result=self.pending_execution_result,
+                attachments=attachments,
             )
             self.pending_execution_result = None
             return result
 
-    async def execute_task(self, chat_result: ChatResult) -> WorkerResult | None:
+    async def execute_task(
+        self,
+        chat_result: ChatResult,
+        progress_callback=None,
+    ) -> WorkerResult | AdminResult | None:
         chat_result = ChatResult.model_validate(chat_result)
 
         if chat_result.type != "task":
             return None
 
-        result = await self.worker.execute(chat_result.task)
+        if "admin" in chat_result.task.skill_ids:
+            result = await self.admin.execute(
+                chat_result.task,
+                progress_callback=progress_callback,
+            )
+        else:
+            result = await self.worker.execute(chat_result.task)
         self.chat.record_worker_result(result.response)
 
         if result.status != "needs_input":
@@ -47,8 +64,18 @@ class Controller:
 
         return result
 
-    async def continue_task(self, user_message: str) -> WorkerResult:
-        result = await self.worker.continue_with_user_input(user_message)
+    async def continue_task(
+        self,
+        user_message: str,
+        progress_callback=None,
+    ) -> WorkerResult | AdminResult:
+        if self.admin.awaiting_user_input:
+            result = await self.admin.continue_with_user_input(
+                user_message,
+                progress_callback=progress_callback,
+            )
+        else:
+            result = await self.worker.continue_with_user_input(user_message)
         self.chat.record_worker_continuation(user_message, result.response)
 
         if result.status != "needs_input":
@@ -64,17 +91,17 @@ class Controller:
 
     async def reset_conversation(self, start: bool = True) -> None:
         async with self.lock:
-            await self.worker.close()
+            await asyncio.gather(self.worker.close(), self.admin.close())
             await self.chat.reset(start=start)
             self.pending_execution_result = None
 
     async def cancel_pending_task(self) -> None:
-        await self.worker.abort()
+        await asyncio.gather(self.worker.abort(), self.admin.abort())
         self.pending_execution_result = None
 
     async def close(self) -> None:
         try:
-            await self.worker.close()
+            await asyncio.gather(self.worker.close(), self.admin.close())
         finally:
             try:
                 await self.chat.close()
