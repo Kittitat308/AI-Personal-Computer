@@ -5,7 +5,8 @@ from dotenv import load_dotenv
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-load_dotenv(PROJECT_ROOT / ".env")
+ENV_FILE = Path(os.environ.get("AIPC_ENV_FILE", PROJECT_ROOT / ".env"))
+load_dotenv(ENV_FILE)
 
 AZURE_SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY", "").strip()
 AZURE_SPEECH_REGION = os.getenv("AZURE_SPEECH_REGION", "").strip()

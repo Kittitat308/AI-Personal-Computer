@@ -37,9 +37,10 @@ class ClaudeSession:
         if self.process is not None:
             return
 
-        executable = shutil.which("claude")
+        configured_executable = os.environ.get("AIPC_CLAUDE_EXECUTABLE", "").strip()
+        executable = configured_executable or shutil.which("claude")
 
-        if executable is None:
+        if not executable or not Path(executable).is_file():
             raise RuntimeError("ไม่พบ Claude CLI ใน PATH")
 
         process_options = {}

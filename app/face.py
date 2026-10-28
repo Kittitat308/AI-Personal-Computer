@@ -1,4 +1,6 @@
+import os
 import threading
+from pathlib import Path
 from dataclasses import dataclass
 
 import cv2
@@ -33,8 +35,12 @@ class FaceService:
             return
         from insightface.app import FaceAnalysis
 
+        model_root = Path(
+            os.environ.get("AIPC_INSIGHTFACE_HOME", "~/.insightface")
+        ).expanduser()
         analyzer = FaceAnalysis(
             name="buffalo_m",
+            root=str(model_root),
             providers=["CPUExecutionProvider"],
             allowed_modules=["detection", "recognition"],
         )

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=AI Personal Computer
+Comment=Open AI Personal Computer chatbot
+Exec=/usr/local/bin/aipc-open-chatbot
+Icon=computer
+Terminal=false
+Categories=Utility;

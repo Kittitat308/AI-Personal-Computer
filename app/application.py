@@ -1,5 +1,7 @@
 import asyncio
 import hmac
+import os
+import subprocess
 import secrets
 import shutil
 import tempfile
@@ -28,6 +30,7 @@ from app.ui import (
 )
 from app.recovery_email import RecoveryEmailSender
 from app.voice import ManualRecorder, VoiceListener
+from core.config import DOCUMENTS_DIR
 from speech.wakeword import WakeWordListener, WakeWordService
 from speech.tts import AudioQueue
 
@@ -50,8 +53,19 @@ class DesktopApplication:
 
     def __init__(self, project_root: Path):
         self.project_root = project_root
+        self.system_mode = os.environ.get("AIPC_SYSTEM_MODE") == "1"
         self.state = RuntimeState()
-        self.database = Database(project_root / "data" / "ai_personal_computer.db")
+        if self.system_mode:
+            from aipc_system.auth_client import AuthClient
+            self.database = AuthClient()
+        else:
+            database_path = Path(
+                os.environ.get(
+                    "AIPC_AUTH_DATABASE",
+                    project_root / "data" / "ai_personal_computer.db",
+                )
+            )
+            self.database = Database(database_path)
         self.attachment_cache = tempfile.TemporaryDirectory(prefix="ai_pc_attachments_")
         self.attachment_cache_path = Path(self.attachment_cache.name).resolve()
         self.input_attachment_cache: tempfile.TemporaryDirectory | None = None
@@ -143,6 +157,9 @@ class DesktopApplication:
         self.window.settings.back_requested.connect(self._return_to_chat)
 
     async def start(self) -> None:
+        if self.system_mode:
+            await self._start_system_desktop()
+            return
         self.startup_errors.extend(await self._prepare_login_services())
         try:
             await asyncio.to_thread(self.hotkeys.start)
@@ -163,6 +180,61 @@ class DesktopApplication:
         if camera_error:
             self.startup_errors.append(camera_error)
         self._refresh_settings()
+        if self.startup_errors:
+            QTimer.singleShot(
+                0,
+                lambda: self._show_error("\n".join(self.startup_errors)),
+            )
+
+    async def _start_system_desktop(self) -> None:
+        user = await asyncio.to_thread(self.database.get_current_user)
+        settings = await asyncio.to_thread(self.database.get_device_settings, user.id)
+        camera, microphone, speaker = await asyncio.gather(
+            asyncio.to_thread(HardwareManager.camera_available),
+            asyncio.to_thread(HardwareManager.microphone_available),
+            asyncio.to_thread(HardwareManager.speaker_available),
+        )
+        self.state.camera_available = camera
+        self.state.microphone_available = microphone
+        self.state.speaker_available = speaker
+
+        if camera and settings.camera_enabled:
+            try:
+                await asyncio.to_thread(self.face.load)
+            except Exception as error:
+                self.state.camera_available = False
+                self.startup_errors.append(f"โหลดระบบจดจำใบหน้าไม่สำเร็จ: {error}")
+        if microphone and settings.microphone_enabled:
+            try:
+                await asyncio.to_thread(self.stt.start)
+                await asyncio.to_thread(self.wakeword.start)
+                self.wakeword_ready = True
+            except Exception as error:
+                self.state.microphone_available = False
+                self.startup_errors.append(f"โหลดระบบรับเสียงไม่สำเร็จ: {error}")
+        if speaker and settings.tts_enabled:
+            try:
+                await self.audio_queue.start()
+            except Exception as error:
+                self.state.speaker_available = False
+                self.startup_errors.append(f"เตรียมระบบเสียงพูดไม่สำเร็จ: {error}")
+        try:
+            await asyncio.to_thread(self.hotkeys.start)
+        except Exception as error:
+            self.startup_errors.append(f"เปิดปุ่ม F9 และ F10 ไม่สำเร็จ: {error}")
+
+        self.state.login(user.id, user.username, user.nickname)
+        self.state.voice_mode = "normal"
+        self.window.chat.clear_messages()
+        self.window.chat.set_folder(None)
+        self.window.chat.set_nickname(user.nickname)
+        self.window.chat.set_voice_mode("normal")
+        self.window.chat.set_permission_mode("ask")
+        self.controller.set_admin_permission_mode("ask")
+        self.window.show_chat()
+        self.window.showMaximized()
+        self.presence_timer.start()
+        await self._enter_chat_session()
         if self.startup_errors:
             QTimer.singleShot(
                 0,
@@ -293,6 +365,9 @@ class DesktopApplication:
             print("SHUTDOWN WARNING: " + " | ".join(errors))
 
     def _request_shutdown(self) -> None:
+        if self.system_mode and self.state.logged_in:
+            self.window.hide()
+            return
         if self.shutdown_started:
             return
         self.shutdown_started = True
@@ -965,6 +1040,21 @@ class DesktopApplication:
             if self.current_operation is not None and not self.current_operation.done():
                 self.current_operation.cancel()
             await self._leave_chat_session()
+            if self.system_mode:
+                self.state.logout()
+                self.window.chat.clear_messages()
+                session_id = os.environ.get("XDG_SESSION_ID", "").strip()
+                if session_id:
+                    subprocess.Popen(
+                        ["/usr/bin/loginctl", "terminate-session", session_id],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+                else:
+                    self.window.finish_close()
+                return
             self.preview_timer.stop()
             self.login_timer.stop()
             await asyncio.to_thread(self.face.close_camera)
@@ -1233,7 +1323,7 @@ class DesktopApplication:
         self._speak(message)
 
     def _document_snapshot(self) -> dict[Path, tuple[int, int]]:
-        documents = (self.project_root / "documents").resolve()
+        documents = DOCUMENTS_DIR
         snapshot: dict[Path, tuple[int, int]] = {}
         candidates = list(documents.rglob("*")) if documents.is_dir() else []
         candidates.extend(self.project_root.glob("*"))
@@ -1287,8 +1377,8 @@ class DesktopApplication:
         return destination
 
     def _clear_documents(self) -> None:
-        documents = (self.project_root / "documents").resolve()
-        expected = self.project_root.resolve() / "documents"
+        documents = DOCUMENTS_DIR
+        expected = DOCUMENTS_DIR
         if documents != expected:
             raise RuntimeError("ตำแหน่งโฟลเดอร์ documents ไม่ถูกต้อง")
         documents.mkdir(parents=True, exist_ok=True)
@@ -1311,7 +1401,7 @@ class DesktopApplication:
         if source.parent != project_root:
             return source
 
-        documents = (project_root / "documents").resolve()
+        documents = DOCUMENTS_DIR
         documents.mkdir(parents=True, exist_ok=True)
         destination = documents / source.name
         counter = 2
@@ -1323,7 +1413,7 @@ class DesktopApplication:
     def save_attachment(self, source_path: str) -> None:
         source = Path(source_path).resolve()
         project_root = self.project_root.resolve()
-        documents = (self.project_root / "documents").resolve()
+        documents = DOCUMENTS_DIR
         in_project = source.parent == project_root or documents in source.parents
         in_cache = source.parent == self.attachment_cache_path
         if not in_project and not in_cache:

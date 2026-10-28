@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=AI Personal Computer Background Service
+Comment=Start the personal AI service for this desktop session
+Exec=/usr/local/bin/aipc-start-session
+Terminal=false
+X-GNOME-Autostart-enabled=true

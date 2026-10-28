@@ -6,7 +6,8 @@ from dotenv import load_dotenv
 
 SKILL_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SKILL_DIR.parents[2]
-load_dotenv(PROJECT_ROOT / ".env")
+ENV_FILE = Path(os.environ.get("AIPC_ENV_FILE", PROJECT_ROOT / ".env"))
+load_dotenv(ENV_FILE)
 
 MCP_HOST = "127.0.0.1"
 MCP_PORT = int(os.environ.get("YOUTUBE_MCP_PORT", "8768"))

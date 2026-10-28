@@ -1,9 +1,13 @@
+import os
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = PROJECT_ROOT / "prompts"
 SKILLS_DIR = PROJECT_ROOT / ".claude" / "skills"
+DOCUMENTS_DIR = Path(
+    os.environ.get("AIPC_DOCUMENTS_DIR", PROJECT_ROOT / "documents")
+).resolve()
 
 MODEL = "haiku"
 CONFIRMATION_MODEL = "haiku"

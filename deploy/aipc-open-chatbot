@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+systemctl --user start aipc-user.service
+systemctl --user kill --kill-who=main --signal=USR1 aipc-user.service

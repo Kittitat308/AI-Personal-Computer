@@ -5,7 +5,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from core.config import PROJECT_ROOT, SKILLS_DIR
+from core.config import DOCUMENTS_DIR, PROJECT_ROOT, SKILLS_DIR
 
 
 @dataclass(frozen=True)
@@ -212,7 +212,7 @@ class SkillRegistry:
             tool_names=(),
             builtin_tool_names=("Read", "Write", "Edit", "Bash", "Glob", "Grep"),
             slash_command="docx",
-            working_directory=PROJECT_ROOT / "documents",
+            working_directory=DOCUMENTS_DIR,
         )
         xlsx = SkillDefinition(
             skill_id="xlsx",
@@ -224,7 +224,7 @@ class SkillRegistry:
             tool_names=(),
             builtin_tool_names=("Read", "Write", "Edit", "Bash", "Glob", "Grep"),
             slash_command="xlsx",
-            working_directory=PROJECT_ROOT / "documents",
+            working_directory=DOCUMENTS_DIR,
         )
         pptx = SkillDefinition(
             skill_id="pptx",
@@ -236,7 +236,7 @@ class SkillRegistry:
             tool_names=(),
             builtin_tool_names=("Read", "Write", "Edit", "Bash", "Glob", "Grep"),
             slash_command="pptx",
-            working_directory=PROJECT_ROOT / "documents",
+            working_directory=DOCUMENTS_DIR,
         )
         pdf = SkillDefinition(
             skill_id="pdf",
@@ -248,7 +248,7 @@ class SkillRegistry:
             tool_names=(),
             builtin_tool_names=("Read", "Write", "Edit", "Bash", "Glob", "Grep"),
             slash_command="pdf",
-            working_directory=PROJECT_ROOT / "documents",
+            working_directory=DOCUMENTS_DIR,
         )
         admin = SkillDefinition(
             skill_id="admin",

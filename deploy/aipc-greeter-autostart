@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+export AIPC_STATE_DIR=/var/lib/ai-personal-computer
+export AIPC_RUNTIME_DIR=/run/ai-personal-computer
+export AIPC_INSIGHTFACE_HOME=/opt/ai-personal-computer/models/insightface
+export AIPC_GOOGLE_CREDENTIALS=/etc/ai-personal-computer/google_credentials.json
+export AIPC_GMAIL_RECOVERY_TOKEN=/etc/ai-personal-computer/gmail_recovery_token.json
+cd /opt/ai-personal-computer
+exec /opt/ai-personal-computer/.venv/bin/python /opt/ai-personal-computer/run_greeter.py

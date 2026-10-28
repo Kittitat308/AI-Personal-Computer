@@ -1,5 +1,6 @@
 import base64
 import html
+import os
 import re
 import threading
 from datetime import datetime
@@ -46,8 +47,17 @@ class GmailReader:
 
     def __init__(self, project_root, skill_directory):
 
-        self.credentials_path = Path(project_root) / "google_credentials.json"
-        self.token_path = Path(skill_directory) / "gmail_token.json"
+        self.credentials_path = Path(
+            os.environ.get(
+                "AIPC_GOOGLE_CREDENTIALS",
+                Path(project_root) / "google_credentials.json",
+            )
+        )
+        token_directory = Path(
+            os.environ.get("AIPC_GOOGLE_USER_DATA", skill_directory)
+        )
+        token_directory.mkdir(parents=True, exist_ok=True)
+        self.token_path = token_directory / "gmail_token.json"
         self.service = None
         self.service_lock = threading.Lock()
 

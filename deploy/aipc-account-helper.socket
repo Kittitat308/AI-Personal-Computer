@@ -1,0 +1,14 @@
+[Unit]
+Description=AI Personal Computer privileged account helper socket
+Before=aipc-auth.service
+
+[Socket]
+ListenStream=/run/aipc-account-helper.sock
+SocketUser=aipc-auth
+SocketGroup=aipc-auth
+SocketMode=0600
+RemoveOnStop=true
+Accept=yes
+
+[Install]
+WantedBy=sockets.target

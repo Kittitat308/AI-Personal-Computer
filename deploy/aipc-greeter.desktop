@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=AI Personal Computer Greeter
+Comment=Face and password login for AI Personal Computer
+Exec=/usr/bin/labwc -C /etc/xdg/aipc-greeter/
+Type=Application
+X-LightDM-Session-Type=wayland

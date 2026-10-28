@@ -1,0 +1,1 @@
+%aipc-users ALL=(aipc-ai) NOPASSWD: /usr/local/libexec/aipc-claude-launcher

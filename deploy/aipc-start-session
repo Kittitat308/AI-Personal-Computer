@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+/usr/bin/systemctl --user import-environment \
+    DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS \
+    XDG_CURRENT_DESKTOP XDG_SESSION_TYPE
+exec /usr/bin/systemctl --user start aipc-user.service

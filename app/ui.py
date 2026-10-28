@@ -826,6 +826,8 @@ class FormDialog(QDialog):
 class LoginPage(QWidget):
     sign_in_requested = Signal()
     register_requested = Signal()
+    restart_requested = Signal()
+    shutdown_requested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -858,6 +860,18 @@ class LoginPage(QWidget):
         buttons.addWidget(sign_in)
         buttons.addStretch()
         outer.addLayout(buttons)
+        outer.addStretch()
+        power_buttons = QHBoxLayout()
+        power_buttons.setSpacing(12)
+        restart = QPushButton("รีสตาร์ต")
+        shutdown = QPushButton("ปิดเครื่อง")
+        shutdown.setObjectName("cancel")
+        restart.clicked.connect(self.restart_requested)
+        shutdown.clicked.connect(self.shutdown_requested)
+        power_buttons.addStretch()
+        power_buttons.addWidget(restart)
+        power_buttons.addWidget(shutdown)
+        outer.addLayout(power_buttons)
 
     def show_frame(self, pixmap: QPixmap) -> None:
         self.camera.setPixmap(

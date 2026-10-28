@@ -1,0 +1,21 @@
+[Unit]
+Description=AI Personal Computer Raspberry Pi Connect display bridge
+After=lightdm.service user@1000.service
+Wants=lightdm.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/aipc-rpi-connect-bridge
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+InaccessiblePaths=/home /root
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/run/user
+
+[Install]
+WantedBy=multi-user.target

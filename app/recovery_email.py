@@ -1,4 +1,5 @@
 import base64
+import os
 import threading
 from email.message import EmailMessage
 from pathlib import Path
@@ -15,8 +16,18 @@ SEND_SCOPE = ["https://www.googleapis.com/auth/gmail.send"]
 
 class RecoveryEmailSender:
     def __init__(self, project_root: Path):
-        self.credentials_path = project_root / "google_credentials.json"
-        self.token_path = project_root / "secrets" / "gmail_recovery_token.json"
+        self.credentials_path = Path(
+            os.environ.get(
+                "AIPC_GOOGLE_CREDENTIALS",
+                project_root / "google_credentials.json",
+            )
+        )
+        self.token_path = Path(
+            os.environ.get(
+                "AIPC_GMAIL_RECOVERY_TOKEN",
+                project_root / "secrets" / "gmail_recovery_token.json",
+            )
+        )
         self.token_path.parent.mkdir(parents=True, exist_ok=True)
         self._service = None
         self._lock = threading.Lock()

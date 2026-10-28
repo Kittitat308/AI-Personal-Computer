@@ -1,0 +1,22 @@
+[Unit]
+Description=AI Personal Computer background assistant
+After=graphical-session.target pipewire.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ai-personal-computer
+Environment=AIPC_SYSTEM_MODE=1
+Environment=AIPC_STATE_DIR=/var/lib/ai-personal-computer
+Environment=AIPC_RUNTIME_DIR=/run/ai-personal-computer
+Environment=AIPC_ENV_FILE=/etc/ai-personal-computer/runtime.env
+Environment=AIPC_GOOGLE_CREDENTIALS=/etc/ai-personal-computer/google_credentials.json
+Environment=AIPC_GMAIL_RECOVERY_TOKEN=/etc/ai-personal-computer/gmail_recovery_token.json
+Environment=AIPC_CLAUDE_EXECUTABLE=/usr/local/bin/aipc-claude
+Environment=AIPC_BROWSER_DATA_DIR=%h/.local/share/ai-personal-computer/browser-data
+Environment=AIPC_GOOGLE_USER_DATA=%h/.local/share/ai-personal-computer/google
+Environment="AIPC_DOCUMENTS_DIR=%h/Documents/AI Personal Computer"
+Environment=AIPC_INSIGHTFACE_HOME=/opt/ai-personal-computer/models/insightface
+ExecStart=/opt/ai-personal-computer/.venv/bin/python /opt/ai-personal-computer/run_gui.py
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15

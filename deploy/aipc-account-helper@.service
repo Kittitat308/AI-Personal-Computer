@@ -1,0 +1,18 @@
+[Unit]
+Description=AI Personal Computer privileged account helper
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/libexec/aipc-account-helper
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+UMask=0077
+PrivateTmp=true
+NoNewPrivileges=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX

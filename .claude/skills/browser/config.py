@@ -3,7 +3,9 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-USER_DATA_DIR = PROJECT_ROOT / "browser_data"
+USER_DATA_DIR = Path(
+    os.environ.get("AIPC_BROWSER_DATA_DIR", PROJECT_ROOT / "browser_data")
+)
 HEADLESS = False
 BROWSER_ARGUMENTS = [
     "--disable-blink-features=AutomationControlled",

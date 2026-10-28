@@ -1,0 +1,32 @@
+[Unit]
+Description=AI Personal Computer authentication service
+Requires=aipc-account-helper.socket
+After=local-fs.target aipc-account-helper.socket
+Before=display-manager.service
+
+[Service]
+Type=simple
+User=aipc-auth
+Group=aipc-auth
+WorkingDirectory=/opt/ai-personal-computer
+Environment=AIPC_STATE_DIR=/var/lib/ai-personal-computer
+Environment=AIPC_RUNTIME_DIR=/run/ai-personal-computer
+ExecStart=/opt/ai-personal-computer/.venv/bin/python -m aipc_system.auth_service
+Restart=on-failure
+RestartSec=2
+UMask=0077
+RuntimeDirectory=ai-personal-computer
+RuntimeDirectoryMode=0755
+StateDirectory=ai-personal-computer
+StateDirectoryMode=0700
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/var/lib/ai-personal-computer /run/ai-personal-computer
+
+[Install]
+WantedBy=multi-user.target
