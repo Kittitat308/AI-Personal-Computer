@@ -5,13 +5,13 @@ from typing import Literal
 
 from mcp.server.mcpserver import MCPServer
 
-from config import MCP_HOST, MCP_PORT, PROJECT_ROOT, SKILL_DIR
+from config import MCP_HOST, MCP_PORT, PROJECT_ROOT, TOKEN_PATH
 from reader import GmailReader
 
 
 READER = GmailReader(
     project_root=PROJECT_ROOT,
-    skill_directory=SKILL_DIR,
+    token_path=TOKEN_PATH,
 )
 SERVER = MCPServer(
     name="gmail",

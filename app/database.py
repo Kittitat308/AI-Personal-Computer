@@ -25,8 +25,8 @@ class DeviceSettings:
     tts_enabled: bool
 
 
-USERNAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
-USERNAME_START_PATTERN = re.compile(r"^[A-Za-z]")
+USERNAME_PATTERN = re.compile(r"^[a-z][a-z0-9]{0,31}$")
+USERNAME_START_PATTERN = re.compile(r"^[a-z]")
 NICKNAME_PATTERN = re.compile(
     r"^(?:[A-Za-z]+(?: [A-Za-z]+)*|"
     r"[\u0E01-\u0E2E\u0E30-\u0E3A\u0E40-\u0E4E]+"
@@ -70,7 +70,12 @@ class Database:
                 """
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    username TEXT NOT NULL UNIQUE COLLATE BINARY,
+                    username TEXT NOT NULL UNIQUE COLLATE NOCASE
+                        CHECK (
+                            length(username) BETWEEN 1 AND 32
+                            AND username GLOB '[a-z]*'
+                            AND username NOT GLOB '*[^a-z0-9]*'
+                        ),
                     nickname TEXT NOT NULL,
                     password_hash TEXT NOT NULL,
                     recovery_gmail TEXT,
@@ -113,7 +118,7 @@ class Database:
             connection.execute(
                 "UPDATE users SET nickname = username WHERE TRIM(nickname) = ''"
             )
-            self._migrate_username_to_case_sensitive(connection)
+            self._enforce_linux_username_rules(connection)
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS device_settings (
@@ -131,78 +136,65 @@ class Database:
             )
 
     @staticmethod
-    def _migrate_username_to_case_sensitive(connection: sqlite3.Connection) -> None:
-        row = connection.execute(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'"
+    def _enforce_linux_username_rules(connection: sqlite3.Connection) -> None:
+        duplicate = connection.execute(
+            """
+            SELECT lower(username) AS normalized
+            FROM users
+            GROUP BY lower(username)
+            HAVING COUNT(*) > 1
+            LIMIT 1
+            """
         ).fetchone()
-        schema = "" if row is None else str(row["sql"] or "")
-        if "COLLATE NOCASE" not in schema.upper():
-            return
-
-        connection.commit()
-        connection.execute("PRAGMA foreign_keys = OFF")
-        try:
-            connection.executescript(
-                """
-                BEGIN IMMEDIATE;
-
-                ALTER TABLE face_profiles RENAME TO face_profiles_case_backup;
-                ALTER TABLE users RENAME TO users_case_backup;
-
-                CREATE TABLE users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    username TEXT NOT NULL UNIQUE COLLATE BINARY,
-                    nickname TEXT NOT NULL,
-                    password_hash TEXT NOT NULL,
-                    recovery_gmail TEXT,
-                    recovery_gmail_verified INTEGER NOT NULL DEFAULT 0
-                        CHECK (recovery_gmail_verified IN (0, 1)),
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-
-                INSERT INTO users(
-                    id, username, nickname, password_hash, recovery_gmail,
-                    recovery_gmail_verified,
-                    created_at, updated_at
-                )
-                SELECT
-                    id, username, nickname, password_hash, recovery_gmail,
-                    recovery_gmail_verified,
-                    created_at, updated_at
-                FROM users_case_backup;
-
-                CREATE TABLE face_profiles (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    embedding BLOB NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-                );
-
-                INSERT INTO face_profiles(id, user_id, embedding, created_at)
-                SELECT id, user_id, embedding, created_at
-                FROM face_profiles_case_backup;
-
-                DROP TABLE face_profiles_case_backup;
-                DROP TABLE users_case_backup;
-
-                CREATE INDEX idx_face_profiles_user_id
-                    ON face_profiles(user_id);
-
-                COMMIT;
-                """
+        if duplicate is not None:
+            raise RuntimeError(
+                "มีชื่อผู้ใช้ซ้ำกันเมื่อไม่แยกตัวพิมพ์เล็กและใหญ่ "
+                "กรุณาแก้ชื่อผู้ใช้ก่อนเปิดระบบ"
             )
-        except Exception:
-            if connection.in_transaction:
-                connection.rollback()
-            raise
-        finally:
-            connection.execute("PRAGMA foreign_keys = ON")
 
-        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
-        if violations:
-            raise RuntimeError("การย้ายฐานข้อมูลผู้ใช้ทำให้ความสัมพันธ์ข้อมูลไม่ถูกต้อง")
+        invalid = connection.execute(
+            """
+            SELECT username
+            FROM users
+            WHERE length(username) NOT BETWEEN 1 AND 32
+               OR lower(username) NOT GLOB '[a-z]*'
+               OR lower(username) GLOB '*[^a-z0-9]*'
+            LIMIT 1
+            """
+        ).fetchone()
+        if invalid is not None:
+            raise RuntimeError(
+                "ชื่อผู้ใช้เดิมไม่ตรงกับกฎของ Linux account: "
+                f"{invalid['username']}"
+            )
+
+        connection.execute(
+            "UPDATE users SET username = lower(username) WHERE username <> lower(username)"
+        )
+        connection.executescript(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_nocase
+                ON users(username COLLATE NOCASE);
+
+            CREATE TRIGGER IF NOT EXISTS validate_users_username_insert
+            BEFORE INSERT ON users
+            WHEN length(NEW.username) NOT BETWEEN 1 AND 32
+              OR NEW.username NOT GLOB '[a-z]*'
+              OR NEW.username GLOB '*[^a-z0-9]*'
+            BEGIN
+                SELECT RAISE(ABORT, 'invalid Linux username');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS validate_users_username_update
+            BEFORE UPDATE OF username ON users
+            WHEN length(NEW.username) NOT BETWEEN 1 AND 32
+              OR NEW.username NOT GLOB '[a-z]*'
+              OR NEW.username GLOB '*[^a-z0-9]*'
+            BEGIN
+                SELECT RAISE(ABORT, 'invalid Linux username');
+            END;
+            """
+        )
 
     def create_user(
         self,
@@ -344,13 +336,6 @@ class Database:
         with self._lock, self._connection() as connection:
             self._replace_embeddings(connection, user_id, embeddings)
 
-    def has_face_profiles(self) -> bool:
-        with self._lock, self._connection() as connection:
-            row = connection.execute(
-                "SELECT 1 FROM face_profiles LIMIT 1"
-            ).fetchone()
-        return row is not None
-
     def user_has_face_profiles(self, user_id: int) -> bool:
         with self._lock, self._connection() as connection:
             row = connection.execute(
@@ -368,10 +353,6 @@ class Database:
         if row is None:
             return None
         return User(int(row["id"]), str(row["username"]), str(row["nickname"]))
-
-    def get_recovery_gmail(self, user_id: int) -> str:
-        gmail, _verified = self.get_recovery_gmail_status(user_id)
-        return gmail
 
     def get_verified_recovery_gmail(self, user_id: int) -> str:
         gmail, verified = self.get_recovery_gmail_status(user_id)
@@ -509,19 +490,6 @@ class Database:
         return User(user_id, username, nickname)
 
     @staticmethod
-    def _validate_username(username: str) -> None:
-        if not username:
-            raise ValueError("กรุณากรอกชื่อผู้ใช้")
-        if USERNAME_START_PATTERN.match(username) is None:
-            raise ValueError(
-                "ชื่อผู้ใช้ต้องขึ้นต้นด้วยตัวอักษรภาษาอังกฤษ"
-            )
-        if USERNAME_PATTERN.fullmatch(username) is None:
-            raise ValueError(
-                "ใช้ได้เฉพาะตัวอักษรภาษาอังกฤษกับตัวเลขเท่านั้น"
-            )
-
-    @staticmethod
     def validate_user_profile(
         username: str,
         nickname: str,
@@ -535,11 +503,13 @@ class Database:
             errors["username"] = "กรุณากรอกชื่อผู้ใช้"
         elif USERNAME_START_PATTERN.match(username) is None:
             errors["username"] = (
-                "ชื่อผู้ใช้ต้องขึ้นต้นด้วยตัวอักษรภาษาอังกฤษ"
+                "ชื่อผู้ใช้ต้องขึ้นต้นด้วยตัวอักษรภาษาอังกฤษตัวเล็ก"
             )
+        elif len(username) > 32:
+            errors["username"] = "ชื่อผู้ใช้ต้องไม่เกิน 32 ตัวอักษร"
         elif USERNAME_PATTERN.fullmatch(username) is None:
             errors["username"] = (
-                "ใช้ได้เฉพาะตัวอักษรภาษาอังกฤษกับตัวเลขเท่านั้น"
+                "ใช้ได้เฉพาะตัวอักษรภาษาอังกฤษตัวเล็กกับตัวเลขเท่านั้น"
             )
         if not nickname:
             errors["nickname"] = "กรุณากรอกชื่อเล่น"

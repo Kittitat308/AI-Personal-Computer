@@ -57,26 +57,6 @@ class WakeWordService:
         self.cancel()
         self._model = None
 
-    def wait_for_wake_word(self) -> bool:
-        if self._model is None:
-            raise RuntimeError("ระบบคำปลุกยังไม่ได้เริ่มทำงาน")
-
-        self._cancel.clear()
-        self._model.reset()
-        with sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="int16",
-            blocksize=WAKEWORD_FRAME_SAMPLES,
-        ) as stream:
-            while not self._cancel.is_set():
-                frame, _overflowed = stream.read(WAKEWORD_FRAME_SAMPLES)
-                scores = self._model.predict(frame[:, 0])
-                if scores and max(scores.values()) >= WAKEWORD_THRESHOLD:
-                    self._model.reset()
-                    return True
-        return False
-
     def listen_for_command(self) -> np.ndarray:
         """Detect the wake word and capture the command on one mic stream."""
         if self._model is None:

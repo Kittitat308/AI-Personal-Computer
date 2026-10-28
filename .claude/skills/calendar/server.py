@@ -7,7 +7,7 @@ from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, ConfigDict, Field
 
 from calendar_service import CalendarService
-from config import MCP_HOST, MCP_PORT, PROJECT_ROOT, SKILL_DIR
+from config import MCP_HOST, MCP_PORT, PROJECT_ROOT, TOKEN_PATH
 
 
 DateValue = Annotated[str, Field(pattern=r"^\d{4}-\d{2}-\d{2}$")]
@@ -76,7 +76,7 @@ class TimedTiming(BaseModel):
 
 CALENDAR = CalendarService(
     project_root=PROJECT_ROOT,
-    skill_directory=SKILL_DIR,
+    token_path=TOKEN_PATH,
 )
 SERVER = MCPServer(
     name="calendar",

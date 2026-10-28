@@ -288,6 +288,32 @@ class SkillRegistry:
         self.runtimes["browser"].environment_overrides.update(bridge_environment)
         self.runtimes["youtube"].environment_overrides.update(bridge_environment)
 
+    async def set_active_user(self, user_id: int | None) -> None:
+        users_directory = PROJECT_ROOT / "data" / "users"
+        user_directory = users_directory / (
+            str(user_id) if user_id is not None else "default"
+        )
+
+        browser = self.runtimes["browser"]
+        browser_value = str((user_directory / "browser_data").resolve())
+        if browser.environment_overrides.get("AIPC_BROWSER_DATA_DIR") != browser_value:
+            await browser.close()
+            browser.environment_overrides["AIPC_BROWSER_DATA_DIR"] = browser_value
+
+        # Google tokens live directly in the signed-in user's data directory.
+        # Without a user no directory is given, so these skills cannot reuse
+        # another account's token.
+        user_value = str(user_directory.resolve()) if user_id is not None else None
+        for skill_id in ("gmail", "calendar"):
+            runtime = self.runtimes[skill_id]
+            if runtime.environment_overrides.get("AIPC_USER_DATA_DIR") == user_value:
+                continue
+            await runtime.close()
+            if user_value is None:
+                runtime.environment_overrides.pop("AIPC_USER_DATA_DIR", None)
+            else:
+                runtime.environment_overrides["AIPC_USER_DATA_DIR"] = user_value
+
     def catalog(self) -> str:
         return "\n".join(
             f"- `{definition.skill_id}`: {definition.description}"

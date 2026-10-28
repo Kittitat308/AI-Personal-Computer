@@ -44,10 +44,10 @@ FOOTER_PATTERN = re.compile(
 
 class GmailReader:
 
-    def __init__(self, project_root, skill_directory):
+    def __init__(self, project_root, token_path):
 
         self.credentials_path = Path(project_root) / "google_credentials.json"
-        self.token_path = Path(skill_directory) / "gmail_token.json"
+        self.token_path = Path(token_path) if token_path else None
         self.service = None
         self.service_lock = threading.Lock()
 
@@ -57,6 +57,9 @@ class GmailReader:
 
             if self.service is not None and not force_reauthorize:
                 return self.service
+
+            if self.token_path is None:
+                raise RuntimeError("No signed-in user data directory is set")
 
             credentials = None
 
@@ -91,6 +94,7 @@ class GmailReader:
                     )
                     credentials = flow.run_local_server(port=0)
 
+                self.token_path.parent.mkdir(parents=True, exist_ok=True)
                 self.token_path.write_text(
                     credentials.to_json(),
                     encoding="utf-8",

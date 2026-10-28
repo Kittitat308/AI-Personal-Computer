@@ -58,18 +58,6 @@ class PushToTalkHotkey:
         if listener is not None:
             listener.stop()
 
-    def wait_for_press(self) -> None:
-        with self._condition:
-            self._condition.wait_for(lambda: self._pressed or self._closed)
-            if self._closed:
-                raise InterruptedError("ระบบตรวจจับปุ่ม F9 ถูกปิดแล้ว")
-
-    def wait_for_release(self) -> None:
-        with self._condition:
-            self._condition.wait_for(lambda: not self._pressed or self._closed)
-            if self._closed:
-                raise InterruptedError("ระบบตรวจจับปุ่ม F9 ถูกปิดแล้ว")
-
     def _on_press(self, key) -> None:
         if key == self._stop_key:
             callback = None

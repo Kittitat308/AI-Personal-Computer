@@ -1,26 +1,20 @@
 import os
 import re
 import subprocess
-import tempfile
 import threading
 import time
 from pathlib import Path
 
-import numpy as np
 import requests
-import sounddevice as sd
-import soundfile as sf
 
 from speech.stt.config import (
     CANCEL_REQUEST_TIMEOUT_SECONDS,
     CANCEL_WAIT_TIMEOUT_SECONDS,
-    CHANNELS,
     HOST,
     INFERENCE_TIMEOUT_SECONDS,
     LANGUAGE,
     MODEL_PATH,
     PORT,
-    SAMPLE_RATE,
     SERVER_START_TIMEOUT_SECONDS,
     THREADS,
     WARMUP_AUDIO_PATH,
@@ -101,17 +95,6 @@ class STTService:
         self.close()
         raise TimeoutError("รอ Whisper Server พร้อมใช้งานนานเกินไป")
 
-    def listen(self, wait_for_press, wait_for_release) -> str:
-        print("กด F9 ค้างไว้เพื่อพูด...")
-        wait_for_press()
-        audio_path = self._record_audio(wait_for_release)
-
-        try:
-            self.prepare_transcription()
-            return self._transcribe(audio_path)
-        finally:
-            audio_path.unlink(missing_ok=True)
-
     def prepare_transcription(self) -> None:
         """Mark the next transcription as active before it enters a worker thread."""
         self._cancel_requested.clear()
@@ -151,42 +134,6 @@ class STTService:
     def is_shutdown_command(text: str) -> bool:
         normalized = re.sub(r"[\s.!?…。、，！？]+", "", text).casefold()
         return "ปิดระบบ" in normalized
-
-    def _record_audio(self, wait_for_release) -> Path:
-        frames: list[np.ndarray] = []
-
-        def callback(indata, _frames, _time_info, status) -> None:
-            if status:
-                print(f"MIC WARNING: {status}")
-            frames.append(indata.copy())
-
-        print("กำลังฟัง... พูดได้เลยครับ")
-        try:
-            with sd.InputStream(
-                samplerate=SAMPLE_RATE,
-                channels=CHANNELS,
-                dtype="float32",
-                callback=callback,
-            ):
-                wait_for_release()
-        except Exception as error:
-            raise RuntimeError(f"เปิดไมโครโฟนไม่สำเร็จ: {error}") from error
-
-        if not frames:
-            raise RuntimeError("ไม่ได้รับข้อมูลเสียงจากไมโครโฟน")
-
-        audio = np.concatenate(frames, axis=0)
-        print("ปล่อย F9 แล้ว กำลังส่งเสียงเข้า STT...")
-
-        temporary = tempfile.NamedTemporaryFile(
-            prefix="ai_pc_stt_",
-            suffix=".wav",
-            delete=False,
-        )
-        temporary.close()
-        audio_path = Path(temporary.name)
-        sf.write(audio_path, audio, SAMPLE_RATE, subtype="PCM_16")
-        return audio_path
 
     def _transcribe(self, audio_path: Path) -> str:
         if self._cancel_requested.is_set():
