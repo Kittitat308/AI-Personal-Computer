@@ -20,14 +20,10 @@ class VoiceDeviceMixin:
             self.window.chat.set_manual_recording(False)
         if self.voice_listener is not None:
             await asyncio.to_thread(self.voice_listener.stop)
-        if self.wakeword_listener is not None:
-            await asyncio.to_thread(self.wakeword_listener.stop)
         self.state.voice_mode = mode
         self.window.chat.set_voice_mode(mode)
         if mode == "automatic" and self.state.microphone_enabled:
             self._start_voice_listener()
-        elif mode == "normal" and self.state.microphone_enabled:
-            self._start_wakeword_listener()
 
     def _on_manual_mic_requested(self, start: bool) -> None:
         if (
@@ -45,7 +41,6 @@ class VoiceDeviceMixin:
         audio = self.manual_recorder.stop()
         self.window.chat.set_manual_recording(False)
         if audio.size == 0:
-            self._start_wakeword_listener()
             return
         self.state.assistant_busy = True
         self.stt_in_progress = True
@@ -55,8 +50,6 @@ class VoiceDeviceMixin:
         self.current_operation.add_done_callback(self._operation_finished)
 
     async def _start_manual_recording(self) -> None:
-        if self.wakeword_listener is not None:
-            await asyncio.to_thread(self.wakeword_listener.stop)
         if (
             not self.state.logged_in
             or not self.state.microphone_enabled
@@ -68,7 +61,6 @@ class VoiceDeviceMixin:
             await asyncio.to_thread(self.manual_recorder.start)
             self.window.chat.set_manual_recording(True)
         except Exception as error:
-            self._start_wakeword_listener()
             self._show_error(f"เปิดไมโครโฟนไม่สำเร็จ: {error}")
 
     def _on_push_to_talk_pressed(self) -> None:
@@ -95,20 +87,12 @@ class VoiceDeviceMixin:
         self.resume_voice_listener_after_push = bool(
             self.voice_listener is not None and self.voice_listener.running
         )
-        self.resume_wakeword_after_push = bool(
-            self.wakeword_listener is not None and self.wakeword_listener.running
-        )
         if self.resume_voice_listener_after_push:
             await asyncio.to_thread(self.voice_listener.stop)
-        if self.resume_wakeword_after_push:
-            await asyncio.to_thread(self.wakeword_listener.stop)
         if not self.push_to_talk_held:
             if self.resume_voice_listener_after_push:
                 self._start_voice_listener()
-            if self.resume_wakeword_after_push:
-                self._start_wakeword_listener()
             self.resume_voice_listener_after_push = False
-            self.resume_wakeword_after_push = False
             return
         try:
             await asyncio.to_thread(self.manual_recorder.start)
@@ -120,19 +104,13 @@ class VoiceDeviceMixin:
                 self.window.chat.set_manual_recording(False)
                 if self.resume_voice_listener_after_push:
                     self._start_voice_listener()
-                if self.resume_wakeword_after_push:
-                    self._start_wakeword_listener()
                 self.resume_voice_listener_after_push = False
-                self.resume_wakeword_after_push = False
         except Exception as error:
             self.push_to_talk_recording = False
             self.window.chat.set_manual_recording(False)
             if self.resume_voice_listener_after_push:
                 self._start_voice_listener()
-            if self.resume_wakeword_after_push:
-                self._start_wakeword_listener()
             self.resume_voice_listener_after_push = False
-            self.resume_wakeword_after_push = False
             self._show_error(f"เปิดไมโครโฟนไม่สำเร็จ: {error}")
 
     async def _finish_push_to_talk(self) -> None:
@@ -140,9 +118,7 @@ class VoiceDeviceMixin:
             return
         self.push_to_talk_recording = False
         resume_voice_listener = self.resume_voice_listener_after_push
-        resume_wakeword = self.resume_wakeword_after_push
         self.resume_voice_listener_after_push = False
-        self.resume_wakeword_after_push = False
         try:
             audio = await asyncio.to_thread(self.manual_recorder.stop)
         except Exception as error:
@@ -154,8 +130,6 @@ class VoiceDeviceMixin:
             self._on_utterance(audio)
         if resume_voice_listener:
             self._start_voice_listener()
-        if resume_wakeword:
-            self._start_wakeword_listener()
 
     async def _transcribe_to_input(self, audio) -> None:
         failed = False
@@ -174,12 +148,6 @@ class VoiceDeviceMixin:
             if not self.operation_canceling:
                 self.state.assistant_busy = False
                 self.window.chat.set_busy(False)
-                if (
-                    self.state.logged_in
-                    and self.state.microphone_enabled
-                    and self.state.voice_mode == "normal"
-                ):
-                    self._start_wakeword_listener()
             if failed and not self.operation_canceling:
                 self.window.chat.show_activity_error("แปลงเสียงเป็นข้อความล้มเหลว")
 
@@ -334,7 +302,6 @@ class VoiceDeviceMixin:
                 self.push_to_talk_held = False
                 self.push_to_talk_recording = False
                 self.resume_voice_listener_after_push = False
-                self.resume_wakeword_after_push = False
                 if self.manual_recorder.recording:
                     await asyncio.to_thread(self.manual_recorder.stop)
                     self.window.chat.set_manual_recording(False)
@@ -380,8 +347,6 @@ class VoiceDeviceMixin:
                 self.state.microphone_enabled = True
                 if self.state.voice_mode == "automatic":
                     self._start_voice_listener()
-                else:
-                    self._start_wakeword_listener()
                 self.window.chat.set_mic_enabled(True)
             elif key == "tts":
                 available = await asyncio.to_thread(HardwareManager.speaker_available)

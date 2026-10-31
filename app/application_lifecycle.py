@@ -63,24 +63,14 @@ class LifecycleMixin:
             except Exception as error:
                 errors.append(f"โหลดระบบรับเสียงไม่สำเร็จ: {error}")
                 return errors
-        if not self.wakeword_ready:
-            try:
-                await asyncio.to_thread(self.wakeword.start)
-                self.wakeword_ready = True
-            except Exception as error:
-                errors.append(f"โหลดระบบคำปลุก Alexa ไม่สำเร็จ: {error}")
         return errors
 
     async def _close_microphone_services(self) -> None:
         if self.voice_listener is not None:
             await asyncio.to_thread(self.voice_listener.stop)
-        if self.wakeword_listener is not None:
-            await asyncio.to_thread(self.wakeword_listener.stop)
         await asyncio.to_thread(self.manual_recorder.close)
-        await asyncio.to_thread(self.wakeword.close)
         await asyncio.to_thread(self.stt.close)
         self.stt_ready = False
-        self.wakeword_ready = False
 
     async def _load_tts_service(self) -> list[str]:
         if not self.state.speaker_available or self.tts_ready:
@@ -135,16 +125,6 @@ class LifecycleMixin:
                 await asyncio.to_thread(self.voice_listener.stop)
             except Exception as error:
                 errors.append(str(error))
-        if self.wakeword_listener is not None:
-            try:
-                await asyncio.to_thread(self.wakeword_listener.stop)
-            except Exception as error:
-                errors.append(str(error))
-        try:
-            await asyncio.to_thread(self.wakeword.close)
-            self.wakeword_ready = False
-        except Exception as error:
-            errors.append(str(error))
         try:
             await asyncio.to_thread(self.manual_recorder.close)
         except Exception as error:
@@ -212,25 +192,6 @@ class LifecycleMixin:
                 on_error=lambda error: self.bridge.voice_error.emit(str(error)),
             )
         self.voice_listener.start()
-
-    def _start_wakeword_listener(self) -> None:
-        if not self.wakeword_ready:
-            return
-        if self.wakeword_listener is None:
-            self.wakeword_listener = WakeWordListener(
-                service=self.wakeword,
-                on_command=self.bridge.utterance.emit,
-                can_listen=lambda: (
-                    self.state.logged_in
-                    and self.state.microphone_enabled
-                    and self.state.voice_mode == "normal"
-                    and not self.state.assistant_busy
-                    and not self.manual_recorder.recording
-                    and not self.push_to_talk_recording
-                ),
-                on_error=lambda error: self.bridge.voice_error.emit(str(error)),
-            )
-        self.wakeword_listener.start()
 
     def _update_camera_preview(self) -> None:
         if not self.state.camera_enabled:

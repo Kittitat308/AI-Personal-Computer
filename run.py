@@ -6,8 +6,7 @@ from core.controller import Controller
 import core.config  # noqa: F401  (loads .env)
 from providers.catalog import DEFAULT_PROVIDER
 from app.stt_adapter import GUISTTService
-from speech.wakeword import WakeWordService
-from speech.wakeword.config import WAKEWORD_NAME
+from speech.recorder import ManualRecorder
 from speech.tts import AudioQueue
 
 
@@ -23,7 +22,7 @@ async def main() -> None:
     )
     stt = GUISTTService()
     audio_queue = AudioQueue()
-    wakeword = WakeWordService()
+    recorder = ManualRecorder()
 
     def show_admin_progress(message: str) -> None:
         print(f"\nADMIN PROGRESS:\n{message}")
@@ -32,26 +31,28 @@ async def main() -> None:
     try:
         await asyncio.gather(
             asyncio.to_thread(stt.start),
-            asyncio.to_thread(wakeword.start),
             audio_queue.start(),
         )
         print("\nAI Personal Computer พร้อมใช้งาน")
-        print(
-            f"พูดว่า '{WAKEWORD_NAME}' เพื่อเริ่มพูดคำสั่ง "
-            "และพูดว่า 'ปิดระบบ' เพื่อออก\n"
-        )
+        print("กด Enter เพื่อเริ่มพูด และกด Enter อีกครั้งเพื่อหยุด")
+        print("พูดว่า 'ปิดระบบ' หรือกด Ctrl+C เพื่อออก\n")
 
         while True:
             try:
-                audio = await asyncio.to_thread(wakeword.listen_for_command)
+                await asyncio.to_thread(input, "[Enter] เริ่มพูด ")
+                recorder.start()
+                print("กำลังบันทึกเสียง...")
+                try:
+                    await asyncio.to_thread(input, "[Enter] หยุด ")
+                finally:
+                    audio = recorder.stop()
                 if not audio.size:
-                    print(
-                        f"ไม่ได้ยินคำสั่ง กรุณาพูด {WAKEWORD_NAME} "
-                        "แล้วลองใหม่ครับ\n"
-                    )
+                    print("ไม่ได้ยินเสียง กรุณาลองใหม่ครับ\n")
                     continue
                 stt.prepare_transcription()
                 message = (await asyncio.to_thread(stt.transcribe_audio, audio)).strip()
+            except (EOFError, KeyboardInterrupt):
+                break
             except Exception as error:
                 print(f"\nSTT ERROR:\n{error}\n")
                 continue
@@ -101,7 +102,7 @@ async def main() -> None:
 
             print(f"TOTAL: {time.perf_counter() - started:.2f} s\n")
     finally:
-        wakeword.close()
+        recorder.close()
         await asyncio.to_thread(stt.close)
         try:
             await audio_queue.close()

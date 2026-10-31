@@ -87,12 +87,6 @@ class ChatMixin:
 
             dialog.close()
             self._refresh_settings()
-            if (
-                self.state.logged_in
-                and self.state.microphone_enabled
-                and self.state.voice_mode == "normal"
-            ):
-                self._start_wakeword_listener()
             if errors and self.state.logged_in:
                 self._show_error("\n".join(errors))
 
@@ -111,7 +105,6 @@ class ChatMixin:
                 self.push_to_talk_held = False
                 self.push_to_talk_recording = False
                 self.resume_voice_listener_after_push = False
-                self.resume_wakeword_after_push = False
                 self.current_operation = None
                 self._reset_attachment_cache()
                 self._reset_input_attachment_cache()

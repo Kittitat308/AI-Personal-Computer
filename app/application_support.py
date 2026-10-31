@@ -29,7 +29,6 @@ from app.ui import (
 from app.recovery_email import RecoveryEmailSender
 from app.voice import ManualRecorder, VoiceListener
 from speech.hotkey import PushToTalkHotkey
-from speech.wakeword import WakeWordListener, WakeWordService
 from speech.tts import AudioQueue
 
 
@@ -64,7 +63,5 @@ __all__ = [
     "ManualRecorder",
     "VoiceListener",
     "PushToTalkHotkey",
-    "WakeWordListener",
-    "WakeWordService",
     "AudioQueue",
 ]

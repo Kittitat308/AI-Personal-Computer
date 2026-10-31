@@ -44,9 +44,6 @@ class DesktopApplication(
         self.audio_queue = AudioQueue()
         self.tts_ready = False
         self.recovery_email = RecoveryEmailSender(project_root)
-        self.wakeword = WakeWordService()
-        self.wakeword_listener: WakeWordListener | None = None
-        self.wakeword_ready = False
         self.window = MainWindow()
         self.bridge = ThreadBridge()
         self.hotkeys = PushToTalkHotkey(
@@ -59,7 +56,6 @@ class DesktopApplication(
         self.push_to_talk_held = False
         self.push_to_talk_recording = False
         self.resume_voice_listener_after_push = False
-        self.resume_wakeword_after_push = False
         self.current_operation: asyncio.Task | None = None
         self.stt_in_progress = False
         self.operation_canceling = False
