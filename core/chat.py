@@ -2,7 +2,6 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
-from core.attachments import build_user_content
 from core.config import (
     CHAT_RECENT_TURNS_TO_KEEP,
     CHAT_SESSION_TURN_LIMIT,
@@ -44,9 +43,6 @@ class ChatAI:
             ]
         )
 
-    async def start(self) -> None:
-        return None
-
     def _messages(self, current_content) -> list[dict]:
         messages: list[dict] = [
             {"role": "system", "content": self._system_prompt()}
@@ -77,13 +73,7 @@ class ChatAI:
             )
 
         attachment_paths = attachments or []
-        if attachment_paths and self.provider.name == "claude":
-            message_content = build_user_content(prompt, attachment_paths)
-        elif attachment_paths:
-            paths = "\n".join(f"- {path}" for path in attachment_paths)
-            message_content = f"{prompt}\n\nAttached files:\n{paths}"
-        else:
-            message_content = prompt
+        message_content = self.provider.user_content(prompt, attachment_paths)
 
         try:
             raw = await self.provider.generate_chat(
@@ -126,7 +116,7 @@ class ChatAI:
         self.turn_count = 0
         return True
 
-    async def reset(self, start: bool = True) -> None:
+    async def reset(self) -> None:
         await self.provider.reset_chat()
         self.history.clear()
         self.turn_count = 0

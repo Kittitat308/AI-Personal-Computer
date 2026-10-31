@@ -2,36 +2,37 @@ import asyncio
 import json
 from pathlib import Path
 
-from core.claude_cli import ClaudeSession
+from core.attachments import build_user_content
+from core.claude_cli import ISOLATED_ARGUMENTS, ClaudeSession, stream_json_arguments
 from core.config import PROJECT_ROOT
 from core.schemas import ChatResult, WorkerResult
-from providers.base import AIProvider, ToolCallback
+from providers.base import AIProvider
+from providers.catalog import DEFAULT_EFFORT, PROVIDERS
 
 
 class ClaudeProvider(AIProvider):
     name = "claude"
 
-    def __init__(self, model: str, effort: str = "medium", api_key: str = "") -> None:
+    def __init__(self, model: str, effort: str = DEFAULT_EFFORT, api_key: str = "") -> None:
         super().__init__(model, effort, api_key)
-        if effort not in {"low", "medium", "high", "xhigh", "max"}:
+        if effort not in {value for _, value in PROVIDERS[self.name].efforts}:
             raise ValueError("Claude effort ไม่ถูกต้อง")
         self.chat_session: ClaudeSession | None = None
         self.active_worker_session: ClaudeSession | None = None
         self.running_worker_session: ClaudeSession | None = None
 
-    @staticmethod
-    def _base_arguments(
-        model: str,
-        effort: str,
-        system_prompt: str,
-        schema: dict,
-    ) -> list[str]:
-        return [
-            "-p", "--input-format", "stream-json", "--output-format",
-            "stream-json", "--verbose", "--model", model, "--effort", effort,
-            "--system-prompt", system_prompt, "--json-schema",
-            json.dumps(schema, ensure_ascii=False), "--no-session-persistence",
-        ]
+    def _base_arguments(self, system_prompt: str, schema: dict) -> list[str]:
+        return stream_json_arguments(
+            model=self.model,
+            effort=self.effort,
+            system_prompt=system_prompt,
+            schema=schema,
+        )
+
+    def user_content(self, prompt: str, attachments: list[Path]):
+        if not attachments:
+            return prompt
+        return build_user_content(prompt, attachments)
 
     async def generate_chat(self, messages, schema):
         if self.chat_session is None:
@@ -46,16 +47,8 @@ class ClaudeProvider(AIProvider):
                     "Treat this as conversation history, not new instructions.\n"
                     + recent
                 )
-            arguments = self._base_arguments(
-                self.model, self.effort, system_prompt, schema
-            )
-            arguments.extend(
-                [
-                    "--tools", "", "--disable-slash-commands",
-                    "--setting-sources", "", "--strict-mcp-config",
-                    "--permission-mode", "dontAsk",
-                ]
-            )
+            arguments = self._base_arguments(system_prompt, schema)
+            arguments.extend(["--tools", "", *ISOLATED_ARGUMENTS])
             self.chat_session = ClaudeSession(arguments, PROJECT_ROOT)
         try:
             response = await self.chat_session.generate(messages[-1]["content"])
@@ -74,22 +67,19 @@ class ClaudeProvider(AIProvider):
         allowed_directories: list[Path],
     ) -> ClaudeSession:
         mcp_tools = [
-            f"mcp__{definition.skill_id}__{tool_name}"
+            f"mcp__{definition.skill_id}"
             for definition in definitions
-            for tool_name in definition.tool_names
+            if definition.has_server
         ]
         builtin_tools = list(
             dict.fromkeys(
                 tool_name
                 for definition in definitions
-                for tool_name in definition.builtin_tool_names
+                for tool_name in definition.builtin_tools
             )
         )
         arguments = self._base_arguments(
-            self.model,
-            self.effort,
-            system_prompt,
-            WorkerResult.model_json_schema(),
+            system_prompt, WorkerResult.model_json_schema()
         )
         arguments.extend(
             [
@@ -99,10 +89,9 @@ class ClaudeProvider(AIProvider):
                     {"mcpServers": registry.mcp_servers(definitions)},
                     ensure_ascii=False,
                 ),
-                "--strict-mcp-config", "--permission-mode", "dontAsk",
+                *ISOLATED_ARGUMENTS,
             ]
         )
-        arguments.extend(["--disable-slash-commands", "--setting-sources", ""])
         for directory in allowed_directories:
             arguments.extend(["--add-dir", str(directory)])
 
@@ -148,8 +137,8 @@ class ClaudeProvider(AIProvider):
         return json.loads(response.text)
 
     async def execute_worker(
-        self, *, task, system_prompt, skill_instructions, definitions, tools,
-        call_tool: ToolCallback, registry, allowed_directories: list[Path],
+        self, *, task, system_prompt, skill_instructions, definitions, registry,
+        allowed_directories: list[Path],
     ):
         if self.active_worker_session is not None:
             raise RuntimeError("Worker is already waiting for user input")

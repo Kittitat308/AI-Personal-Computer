@@ -1,0 +1,12 @@
+{
+  "description": "สร้าง อ่าน แก้ไข วิเคราะห์ และจัดรูปแบบไฟล์ตารางคำนวณ Microsoft Excel นามสกุล .xlsx เช่น สูตร ตาราง กราฟ และการสรุปข้อมูล",
+  "builtin_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Glob",
+    "Grep"
+  ],
+  "working_directory": "documents"
+}

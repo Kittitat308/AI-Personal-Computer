@@ -1,23 +1,24 @@
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
+
+
+# Text that is stripped and must not be blank.
+Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 class TaskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    instruction: str = Field(min_length=1)
+    instruction: Text
     skill_ids: list[str] = Field(min_length=1)
-
-    @field_validator("instruction")
-    @classmethod
-    def normalize_instruction(cls, value: str) -> str:
-        value = value.strip()
-
-        if not value:
-            raise ValueError("instruction must not be blank")
-
-        return value
 
     @field_validator("skill_ids")
     @classmethod
@@ -42,18 +43,8 @@ class ChatResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["chat", "task"]
-    response: str = Field(min_length=1)
+    response: Text
     task: TaskRequest | None = None
-
-    @field_validator("response")
-    @classmethod
-    def normalize_response(cls, value: str) -> str:
-        value = value.strip()
-
-        if not value:
-            raise ValueError("response must not be blank")
-
-        return value
 
     @model_validator(mode="after")
     def validate_task_relationship(self):
@@ -70,34 +61,14 @@ class WorkerResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["completed", "needs_input", "failed"]
-    response: str = Field(min_length=1)
-
-    @field_validator("response")
-    @classmethod
-    def normalize_response(cls, value: str) -> str:
-        value = value.strip()
-
-        if not value:
-            raise ValueError("response must not be blank")
-
-        return value
+    response: Text
 
 
 class AdminResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["completed", "needs_input", "failed", "cancelled"]
-    response: str = Field(min_length=1)
-
-    @field_validator("response")
-    @classmethod
-    def normalize_response(cls, value: str) -> str:
-        value = value.strip()
-
-        if not value:
-            raise ValueError("response must not be blank")
-
-        return value
+    response: Text
 
 
 class ConfirmationResult(BaseModel):

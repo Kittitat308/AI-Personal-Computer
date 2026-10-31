@@ -1,7 +1,6 @@
 import asyncio
-import json
 
-from core.claude_cli import ClaudeSession
+from core.claude_cli import ISOLATED_ARGUMENTS, ClaudeSession, stream_json_arguments
 from core.config import CONFIRMATION_MODEL, PROJECT_ROOT, PROMPTS_DIR
 from core.schemas import ConfirmationResult
 
@@ -16,33 +15,12 @@ class ConfirmationAI:
         )
 
     def _create_session(self) -> ClaudeSession:
-        schema = json.dumps(
-            ConfirmationResult.model_json_schema(),
-            ensure_ascii=False,
+        arguments = stream_json_arguments(
+            model=self.model,
+            system_prompt=self.system_prompt.strip(),
+            schema=ConfirmationResult.model_json_schema(),
         )
-        arguments = [
-            "-p",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--model",
-            self.model,
-            "--system-prompt",
-            self.system_prompt.strip(),
-            "--json-schema",
-            schema,
-            "--tools",
-            "",
-            "--disable-slash-commands",
-            "--strict-mcp-config",
-            "--permission-mode",
-            "dontAsk",
-            "--setting-sources",
-            "",
-            "--no-session-persistence",
-        ]
+        arguments.extend(["--tools", "", *ISOLATED_ARGUMENTS])
         return ClaudeSession(arguments, PROJECT_ROOT)
 
     async def classify(

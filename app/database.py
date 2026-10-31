@@ -9,6 +9,8 @@ import numpy as np
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
+from providers.catalog import ALL_EFFORTS, DEFAULT_EFFORT, DEFAULT_PROVIDER, PROVIDERS
+
 
 @dataclass(frozen=True)
 class User:
@@ -44,6 +46,10 @@ NICKNAME_PATTERN = re.compile(
 )
 PASSWORD_PATTERN = re.compile(r"^(?=.*[A-Za-z])(?=.*[0-9])[A-Za-z0-9]{8,}$")
 GMAIL_PATTERN = re.compile(r"^[A-Za-z0-9._%+-]+@gmail\.com$", re.IGNORECASE)
+def _sql_list(values) -> str:
+    return ", ".join(f"'{value}'" for value in values)
+
+
 API_KEY_COLUMNS = {
     "gemini": "gemini_api_key",
 }
@@ -141,7 +147,7 @@ class Database:
             if legacy_keys:
                 connection.execute("ALTER TABLE ai_api_keys RENAME TO ai_api_keys_old")
             connection.executescript(
-                """
+                f"""
                 CREATE TABLE IF NOT EXISTS device_settings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL UNIQUE,
@@ -157,13 +163,13 @@ class Database:
                 CREATE TABLE IF NOT EXISTS ai_settings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL UNIQUE,
-                    provider TEXT NOT NULL DEFAULT 'claude'
-                        CHECK (provider IN ('qwen', 'gemini', 'claude')),
-                    qwen_model TEXT NOT NULL DEFAULT 'Qwen3.5-2B-Q4_K_M.gguf',
-                    gemini_model TEXT NOT NULL DEFAULT 'gemini-3.5-flash-lite',
-                    claude_model TEXT NOT NULL DEFAULT 'haiku',
-                    model_effort TEXT NOT NULL DEFAULT 'medium'
-                        CHECK (model_effort IN ('low', 'medium', 'high', 'xhigh', 'max')),
+                    provider TEXT NOT NULL DEFAULT '{DEFAULT_PROVIDER}'
+                        CHECK (provider IN ({_sql_list(PROVIDERS)})),
+                    qwen_model TEXT NOT NULL DEFAULT '{PROVIDERS["qwen"].default_model}',
+                    gemini_model TEXT NOT NULL DEFAULT '{PROVIDERS["gemini"].default_model}',
+                    claude_model TEXT NOT NULL DEFAULT '{PROVIDERS["claude"].default_model}',
+                    model_effort TEXT NOT NULL DEFAULT '{DEFAULT_EFFORT}'
+                        CHECK (model_effort IN ({_sql_list(ALL_EFFORTS)})),
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
 
@@ -382,9 +388,9 @@ class Database:
     ) -> None:
         provider = provider.strip().casefold()
         model_effort = model_effort.strip().casefold()
-        if provider not in {"qwen", "gemini", "claude"}:
+        if provider not in PROVIDERS:
             raise ValueError("AI provider ไม่ถูกต้อง")
-        if model_effort not in {"low", "medium", "high", "xhigh", "max"}:
+        if model_effort not in ALL_EFFORTS:
             raise ValueError("Model effort ไม่ถูกต้อง")
         models = [qwen_model.strip(), gemini_model.strip(), claude_model.strip()]
         if not all(models):

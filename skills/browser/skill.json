@@ -1,0 +1,9 @@
+{
+  "description": "เปิดเว็บไซต์ ค้นหาเว็บผ่านหน้าต่างเบราว์เซอร์ ปิดแท็บเว็บไซต์ ดูเว็บไซต์ที่เปิดอยู่ และปิดเบราว์เซอร์ที่ระบบควบคุม",
+  "free_ports": [
+    "BROWSER_BRIDGE_PORT"
+  ],
+  "user_env": {
+    "AIPC_BROWSER_DATA_DIR": "{user_dir}/browser_data"
+  }
+}

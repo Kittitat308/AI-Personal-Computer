@@ -1,0 +1,6 @@
+{
+  "description": "ค้นหาวิดีโอหรือช่องบน YouTube ผ่าน YouTube Data API และเปิดวิดีโอในแท็บใหม่หรือแท็บ YouTube ที่ระบุ หากต้องเลือกแท็บเดิมให้ใช้ร่วมกับ browser เพื่อดู tab_id ก่อน",
+  "requires": [
+    "browser"
+  ]
+}

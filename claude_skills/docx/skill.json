@@ -1,0 +1,12 @@
+{
+  "description": "สร้าง อ่าน แก้ไข และจัดรูปแบบเอกสาร Microsoft Word นามสกุล .docx เช่น รายงาน จดหมาย บันทึก ตาราง และเอกสารที่มีรูปภาพ",
+  "builtin_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Glob",
+    "Grep"
+  ],
+  "working_directory": "documents"
+}

@@ -13,10 +13,10 @@ import requests
 
 from core.config import MODELS_DIR
 from core.schemas import WorkerResult
-from providers.base import AIProvider, ToolCallback
+from providers.base import AIProvider
+from providers.catalog import DEFAULT_EFFORT
 
 
-DEFAULT_QWEN_MODEL = "Qwen3.5-2B-Q4_K_M.gguf"
 QWEN_CONTEXT = 4096
 QWEN_GPU_LAYERS = 99
 LLAMA_SERVER_PATH = ""
@@ -27,8 +27,9 @@ LLAMA_DEVICE = "Vulkan1" if os.name == "nt" else "Vulkan0"
 
 class QwenProvider(AIProvider):
     name = "qwen"
+    single_instance = True
 
-    def __init__(self, model: str, effort: str = "medium", api_key: str = "") -> None:
+    def __init__(self, model: str, effort: str = DEFAULT_EFFORT, api_key: str = "") -> None:
         super().__init__(model, effort, api_key)
         self.model_path = MODELS_DIR / model
         if not self.model_path.is_file():
@@ -209,9 +210,11 @@ class QwenProvider(AIProvider):
         return output
 
     async def execute_worker(
-        self, *, task, system_prompt, skill_instructions, definitions, tools,
-        call_tool: ToolCallback, registry, allowed_directories: list[Path],
+        self, *, task, system_prompt, skill_instructions, definitions, registry,
+        allowed_directories: list[Path],
     ):
+        tools = await registry.list_tools(definitions)
+        call_tool = registry.call_tool
         if not tools:
             raise RuntimeError("Qwen Worker ไม่มี Tool สำหรับ Skill ที่เลือก")
         tools_by_name = {tool.name: tool for tool in tools}

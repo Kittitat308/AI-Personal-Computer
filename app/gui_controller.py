@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from core.controller import Controller
+from providers.catalog import DEFAULT_EFFORT
 
 
 class GUIController(Controller):
@@ -19,7 +20,7 @@ class GUIController(Controller):
         self,
         name: str,
         model: str,
-        effort: str = "medium",
+        effort: str = DEFAULT_EFFORT,
         api_key: str = "",
     ) -> None:
         await super().configure_provider(name, model, effort, api_key)

@@ -6,53 +6,31 @@ from core.confirmation import ConfirmationAI
 from core.schemas import AdminResult, ChatResult, WorkerResult
 from core.skill_registry import SkillRegistry
 from core.worker import WorkerAI
-from providers import ClaudeProvider, GeminiProvider, QwenProvider
-from providers.qwen import DEFAULT_QWEN_MODEL
+from providers import create_provider
+from providers.catalog import DEFAULT_EFFORT, DEFAULT_PROVIDER, provider_info
 
 
 class Controller:
     def __init__(
         self,
-        provider_name: str = "claude",
-        model: str | None = None,
-        effort: str = "medium",
+        provider_name: str = DEFAULT_PROVIDER,
+        model: str = "",
+        effort: str = DEFAULT_EFFORT,
         api_key: str = "",
     ):
-        provider_name = provider_name.strip().casefold()
         self.registry = SkillRegistry(provider_name)
         self.admin = AdminAI()
         self.confirmation = ConfirmationAI()
         self.admin_permission_mode = "ask"
-        self.pending_execution_result = None
         self.lock = asyncio.Lock()
-        self.provider = self._create_provider(
-            provider_name,
-            model.strip() if model else self._default_model(provider_name),
-            effort,
-            api_key,
-        )
-        self.chat = ChatAI(self.provider, self.registry.catalog())
-        self.worker = WorkerAI(self.provider, self.registry)
+        self._install(create_provider(provider_name, model, effort, api_key))
 
-    @staticmethod
-    def _default_model(provider_name: str) -> str:
-        return {
-            "qwen": DEFAULT_QWEN_MODEL,
-            "gemini": "gemini-3.5-flash-lite",
-            "claude": "haiku",
-        }.get(provider_name, "haiku")
-
-    @staticmethod
-    def _create_provider(name: str, model: str, effort: str, api_key: str):
-        factories = {
-            "qwen": QwenProvider,
-            "gemini": GeminiProvider,
-            "claude": ClaudeProvider,
-        }
-        normalized = name.strip().casefold()
-        if normalized not in factories:
-            raise ValueError("AI provider ต้องเป็น qwen, gemini หรือ claude")
-        return factories[normalized](model=model, effort=effort, api_key=api_key)
+    def _install(self, provider) -> None:
+        self.provider = provider
+        self.registry.set_provider(provider.name)
+        self.chat = ChatAI(provider, self.registry.catalog())
+        self.worker = WorkerAI(provider, self.registry)
+        self.pending_execution_result = None
 
     @property
     def provider_name(self) -> str:
@@ -70,60 +48,50 @@ class Controller:
         self,
         name: str,
         model: str,
-        effort: str = "medium",
+        effort: str = DEFAULT_EFFORT,
         api_key: str = "",
     ) -> None:
-        normalized = name.strip().casefold()
-        model = model.strip() or self._default_model(normalized)
-        effort = effort.strip().casefold() or "medium"
+        info = provider_info(name)
+        model = model.strip() or info.default_model
+        effort = effort.strip().casefold() or DEFAULT_EFFORT
+        api_key = api_key.strip() if info.uses_api_key else ""
         if (
-            self.provider.name == normalized
+            self.provider.name == info.name
             and self.provider.model == model
             and self.provider.effort == effort
-            and (normalized != "gemini" or self.provider.api_key == api_key.strip())
+            and self.provider.api_key == api_key
         ):
             return
         async with self.lock:
             old_provider = self.provider
-            old_configuration = (
-                old_provider.name,
-                old_provider.model,
-                old_provider.effort,
-                old_provider.api_key,
-            )
-            if old_provider.name == normalized == "qwen":
-                await asyncio.gather(self.worker.close(), self.chat.close())
+            # A single-instance provider holds a fixed resource, so the old one
+            # must stop before the new one can start.
+            close_first = old_provider.single_instance and old_provider.name == info.name
+            if close_first:
+                await asyncio.gather(self.worker.abort(), self.chat.close())
                 await old_provider.close()
-                try:
-                    new_provider = self._create_provider(
-                        normalized, model, effort, api_key
-                    )
-                except Exception:
-                    restored = self._create_provider(*old_configuration)
-                    self.provider = restored
-                    self.chat = ChatAI(restored, self.registry.catalog())
-                    self.worker = WorkerAI(restored, self.registry)
-                    raise
-                self.provider = new_provider
-                self.registry.set_provider(normalized)
-                self.chat = ChatAI(new_provider, self.registry.catalog())
-                self.worker = WorkerAI(new_provider, self.registry)
-                self.pending_execution_result = None
-                return
-            new_provider = self._create_provider(
-                normalized, model, effort, api_key
-            )
             try:
-                await asyncio.gather(self.worker.close(), self.chat.close())
+                new_provider = create_provider(info.name, model, effort, api_key)
             except Exception:
-                await new_provider.close()
+                if close_first:
+                    self._install(
+                        create_provider(
+                            old_provider.name,
+                            old_provider.model,
+                            old_provider.effort,
+                            old_provider.api_key,
+                        )
+                    )
                 raise
-            self.provider = new_provider
-            self.registry.set_provider(normalized)
-            self.chat = ChatAI(new_provider, self.registry.catalog())
-            self.worker = WorkerAI(new_provider, self.registry)
-            self.pending_execution_result = None
-            await old_provider.close()
+            if not close_first:
+                try:
+                    await asyncio.gather(self.worker.abort(), self.chat.close())
+                except Exception:
+                    await new_provider.close()
+                    raise
+            self._install(new_provider)
+            if not close_first:
+                await old_provider.close()
 
     def set_admin_permission_mode(self, mode: str) -> None:
         if mode not in {"ask", "auto"}:
@@ -133,9 +101,6 @@ class Controller:
     @property
     def awaiting_user_input(self) -> bool:
         return self.worker.awaiting_user_input or self.admin.awaiting_user_input
-
-    async def start(self) -> None:
-        await self.chat.start()
 
     async def generate_chat(self, user_message: str, attachments=None) -> ChatResult:
         if self.awaiting_user_input:
@@ -225,10 +190,10 @@ class Controller:
             return False
         return await self.chat.rotate_if_due()
 
-    async def reset_conversation(self, start: bool = True) -> None:
+    async def reset_conversation(self) -> None:
         async with self.lock:
-            await asyncio.gather(self.worker.close(), self.admin.close())
-            await self.chat.reset(start=start)
+            await asyncio.gather(self.worker.abort(), self.admin.abort())
+            await self.chat.reset()
             self.admin_permission_mode = "ask"
             self.pending_execution_result = None
 
@@ -238,7 +203,7 @@ class Controller:
 
     async def close(self) -> None:
         try:
-            await asyncio.gather(self.worker.close(), self.admin.close())
+            await asyncio.gather(self.worker.abort(), self.admin.abort())
         finally:
             try:
                 await self.provider.close()

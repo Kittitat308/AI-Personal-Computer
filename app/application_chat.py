@@ -1,4 +1,5 @@
 from app.application_support import *
+from providers.catalog import PROVIDERS, provider_info
 
 
 class ChatMixin:
@@ -44,7 +45,7 @@ class ChatMixin:
                     ai_settings.provider,
                 )
                 self._load_ai_settings_page(ai_settings, api_key)
-                await self.controller.reset_conversation(start=True)
+                await self.controller.reset_conversation()
             except Exception as error:
                 errors.append(f"เริ่มเซสชัน AI ไม่สำเร็จ: {error}")
 
@@ -100,7 +101,7 @@ class ChatMixin:
             try:
                 await self._close_microphone_services()
                 await self._close_tts_service()
-                await self.controller.reset_conversation(start=False)
+                await self.controller.reset_conversation()
                 await self.controller.set_active_user(None)
             except Exception as error:
                 print(f"LOGOUT WARNING: {error}")
@@ -127,11 +128,13 @@ class ChatMixin:
 
     @staticmethod
     def _model_for_provider(settings, provider: str) -> str:
+        return getattr(settings, f"{provider_info(provider).name}_model")
+
+    @staticmethod
+    def _saved_models(settings) -> dict[str, str]:
         return {
-            "qwen": settings.qwen_model,
-            "gemini": settings.gemini_model,
-            "claude": settings.claude_model,
-        }[provider]
+            f"{name}_model": getattr(settings, f"{name}_model") for name in PROVIDERS
+        }
 
     def _load_ai_settings_page(self, settings, api_key: str) -> None:
         self.window.settings.load_values(
@@ -174,7 +177,7 @@ class ChatMixin:
         if (
             not self.state.logged_in
             or self.ai_model_unselected
-            or self.controller.provider_name not in ("gemini", "claude")
+            or not provider_info(self.controller.provider_name).models
         ):
             return
         asyncio.create_task(self._switch_model_selection(model, effort))
@@ -213,10 +216,11 @@ class ChatMixin:
                 self.database.update_ai_settings,
                 user_id,
                 provider=provider,
-                qwen_model=settings.qwen_model,
-                gemini_model=new_model if provider == "gemini" else settings.gemini_model,
-                claude_model=new_model if provider == "claude" else settings.claude_model,
                 model_effort=new_effort,
+                **{
+                    **self._saved_models(settings),
+                    f"{provider}_model": new_model,
+                },
             )
             updated = await asyncio.to_thread(
                 self.database.get_ai_settings,
@@ -265,10 +269,8 @@ class ChatMixin:
                 self.database.update_ai_settings,
                 user_id,
                 provider=provider,
-                qwen_model=settings.qwen_model,
-                gemini_model=settings.gemini_model,
-                claude_model=settings.claude_model,
                 model_effort=settings.model_effort,
+                **self._saved_models(settings),
             )
             updated = await asyncio.to_thread(
                 self.database.get_ai_settings,

@@ -11,6 +11,48 @@ from pathlib import Path
 from typing import Any
 
 
+# Turns off everything a structured, tool-limited CLI session must not load.
+ISOLATED_ARGUMENTS = (
+    "--disable-slash-commands",
+    "--setting-sources",
+    "",
+    "--strict-mcp-config",
+    "--permission-mode",
+    "dontAsk",
+)
+
+
+def stream_json_arguments(
+    *,
+    model: str,
+    system_prompt: str,
+    schema: dict,
+    effort: str | None = None,
+) -> list[str]:
+    arguments = [
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--model",
+        model,
+    ]
+    if effort:
+        arguments.extend(["--effort", effort])
+    arguments.extend(
+        [
+            "--system-prompt",
+            system_prompt,
+            "--json-schema",
+            json.dumps(schema, ensure_ascii=False),
+            "--no-session-persistence",
+        ]
+    )
+    return arguments
+
+
 @dataclass(frozen=True)
 class ClaudeResponse:
     text: str

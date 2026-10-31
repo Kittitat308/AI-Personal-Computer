@@ -1,13 +1,12 @@
 import asyncio
 import contextlib
-import json
 import os
 import platform
 import shutil
 from pathlib import Path
 from typing import Callable
 
-from core.claude_cli import ClaudeResponse, ClaudeSession
+from core.claude_cli import ClaudeResponse, ClaudeSession, stream_json_arguments
 from core.config import ADMIN_EFFORT, ADMIN_MODEL, PROMPTS_DIR
 from core.schemas import AdminResult, TaskRequest
 
@@ -39,22 +38,13 @@ class AdminAI:
         return self.active_session is not None
 
     def _create_session(self) -> ClaudeSession:
-        schema = json.dumps(AdminResult.model_json_schema(), ensure_ascii=False)
-        arguments = [
-            "-p",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--model",
-            self.model,
-            "--effort",
-            self.effort,
-            "--system-prompt",
-            self.system_prompt.strip(),
-            "--json-schema",
-            schema,
+        arguments = stream_json_arguments(
+            model=self.model,
+            effort=self.effort,
+            system_prompt=self.system_prompt.strip(),
+            schema=AdminResult.model_json_schema(),
+        )
+        arguments += [
             "--tools",
             "default",
             "--permission-mode",
@@ -65,7 +55,6 @@ class AdminAI:
             "stdio",
             "--setting-sources",
             "user,project,local",
-            "--no-session-persistence",
         ]
         return ClaudeSession(
             arguments,
@@ -310,9 +299,6 @@ class AdminAI:
         self.progress_callback = None
         if session is not None:
             await session.close()
-
-    async def close(self) -> None:
-        await self.abort()
 
     async def abort(self) -> None:
         turn_task = self.turn_task

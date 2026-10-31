@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -12,11 +11,6 @@ MODELS_DIR = PROJECT_ROOT / "models"
 
 load_dotenv(PROJECT_ROOT / ".env", override=True)
 
-RUN_AI_PROVIDER = os.getenv("AI_PROVIDER", "claude").strip().casefold()
-RUN_GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-RUN_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
-RUN_CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "haiku").strip()
-RUN_MODEL_EFFORT = os.getenv("MODEL_EFFORT", "medium").strip().casefold()
 CONFIRMATION_MODEL = "haiku"
 ADMIN_MODEL = "claude-opus-5-5"
 ADMIN_EFFORT = "medium"

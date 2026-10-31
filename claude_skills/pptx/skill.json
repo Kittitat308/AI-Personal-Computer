@@ -1,0 +1,12 @@
+{
+  "description": "สร้าง อ่าน แก้ไข และจัดรูปแบบงานนำเสนอ Microsoft PowerPoint นามสกุล .pptx เช่น สไลด์ ข้อความ ตาราง กราฟ และรูปภาพ",
+  "builtin_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Glob",
+    "Grep"
+  ],
+  "working_directory": "documents"
+}

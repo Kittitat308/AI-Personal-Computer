@@ -3,29 +3,23 @@ import json
 from pathlib import Path
 from typing import Any
 
-from providers.base import AIProvider, ToolCallback
+from core.schemas import WorkerResult
+from providers.base import AIProvider
+from providers.catalog import DEFAULT_EFFORT
 
 
-WORKER_ACTION_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "action": {"type": "string", "enum": ["tool", "finish"]},
-        "tool_name": {"type": "string"},
-        "arguments": {"type": "object"},
-        "status": {
-            "type": "string",
-            "enum": ["completed", "needs_input", "failed"],
-        },
-        "response": {"type": "string"},
-    },
-    "required": ["action"],
-}
+MAX_TOOL_ROUNDS = 6
+FINAL_INSTRUCTION = (
+    "Return the final Worker JSON now. Report completed only when a tool result "
+    "confirms the outcome. Use needs_input with one short question when required "
+    "information is missing."
+)
 
 
 class GeminiProvider(AIProvider):
     name = "gemini"
 
-    def __init__(self, model: str, effort: str = "medium", api_key: str = "") -> None:
+    def __init__(self, model: str, effort: str = DEFAULT_EFFORT, api_key: str = "") -> None:
         if not api_key.strip():
             raise RuntimeError("ยังไม่ได้ตั้งค่า Gemini API key")
         super().__init__(model, effort, api_key.strip())
@@ -59,95 +53,135 @@ class GeminiProvider(AIProvider):
         return await asyncio.to_thread(self._json, system, conversation, schema)
 
     async def execute_worker(
-        self, *, task, system_prompt, skill_instructions, definitions, tools,
-        call_tool: ToolCallback, registry, allowed_directories: list[Path],
+        self, *, task, system_prompt, skill_instructions, definitions, registry,
+        allowed_directories: list[Path],
     ):
+        from google.genai import types
+
         if self.pending_worker is not None:
             raise RuntimeError("Worker is already waiting for user input")
-        tools_by_name = {tool.name: tool for tool in tools}
-        if not tools_by_name:
+        tools = await registry.list_tools(definitions)
+        if not tools:
             raise RuntimeError("Gemini Worker ไม่มี Tool สำหรับ Skill ที่เลือก")
-        catalog = json.dumps(
-            [
-                {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.input_schema,
-                }
-                for tool in tools
-            ],
-            ensure_ascii=False,
-        )
-        transcript = (
+        prompt = (
             f"Delegated task:\n{task.model_dump_json()}\n\n"
-            f"Selected skill instructions:\n{skill_instructions}\n\n"
-            f"Available tools:\n{catalog}\n\n"
-            "Return JSON with action=tool, tool_name and arguments to use a tool. "
-            "Return action=finish, status and response only after a tool result "
-            "confirms the outcome. Use status needs_input with one short question "
-            "in response when required information is missing. Use an exact "
-            "available tool name."
+            f"Selected skill instructions:\n{skill_instructions}"
         )
         return await self._run_worker(
             {
                 "system_prompt": system_prompt,
-                "transcript": transcript,
-                "tools_by_name": tools_by_name,
-                "call_tool": call_tool,
+                "contents": [
+                    types.Content(role="user", parts=[types.Part.from_text(text=prompt)])
+                ],
+                "tools_by_name": {tool.name: tool for tool in tools},
+                "call_tool": registry.call_tool,
                 "used_tool": False,
             }
         )
 
+    def _generate(self, state: dict[str, Any], **options: Any):
+        from google.genai import types
+
+        return self.client.models.generate_content(
+            model=self.model,
+            contents=state["contents"],
+            config=types.GenerateContentConfig(
+                system_instruction=state["system_prompt"],
+                temperature=0,
+                **options,
+            ),
+        )
+
     async def _run_worker(self, state: dict[str, Any]) -> dict[str, Any]:
+        from google.genai import types
+
         tools_by_name = state["tools_by_name"]
-        for _ in range(6):
-            action = await asyncio.to_thread(
-                self._json,
-                state["system_prompt"],
-                state["transcript"],
-                WORKER_ACTION_SCHEMA,
-            )
-            if action.get("action") == "finish":
-                status = action.get("status") or "completed"
-                if status == "needs_input":
-                    state["transcript"] += (
-                        "\n\nAssistant question:\n" + (action.get("response") or "")
-                    )
-                    self.pending_worker = state
-                elif not state["used_tool"]:
-                    raise RuntimeError("Worker did not call a required tool")
-                return {
-                    "status": status,
-                    "response": action.get("response") or "ดำเนินการเสร็จแล้วครับ",
-                }
-            tool_name = action.get("tool_name")
-            tool = tools_by_name.get(tool_name)
-            if tool is None:
-                state["transcript"] += (
-                    f"\n\nInvalid tool name: {tool_name!r}. Choose exactly one "
-                    f"from {json.dumps(list(tools_by_name))}."
+        declarations = types.Tool(
+            function_declarations=[
+                types.FunctionDeclaration(
+                    name=tool.name,
+                    description=tool.description,
+                    parameters_json_schema=tool.input_schema,
                 )
-                continue
-            output = await state["call_tool"](tool, action.get("arguments") or {})
-            state["used_tool"] = True
-            state["transcript"] += (
-                f"\n\nTool result from {tool.name}:\n"
-                + json.dumps(output, ensure_ascii=False)
+                for tool in tools_by_name.values()
+            ]
+        )
+        seen_calls: set[str] = set()
+        for _ in range(MAX_TOOL_ROUNDS):
+            response = await asyncio.to_thread(
+                self._generate,
+                state,
+                tools=[declarations],
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                    disable=True
+                ),
             )
-        raise RuntimeError("Gemini Worker exceeded the tool-call limit")
+            calls = response.function_calls or []
+            if not calls:
+                break
+            state["contents"].append(response.candidates[0].content)
+            replies = []
+            repeated = True
+            for call in calls:
+                arguments = dict(call.args or {})
+                key = json.dumps([call.name, arguments], ensure_ascii=False, sort_keys=True)
+                repeated = repeated and key in seen_calls
+                seen_calls.add(key)
+                tool = tools_by_name.get(call.name)
+                if tool is None:
+                    output = {"is_error": True, "content": f"Unknown tool: {call.name}"}
+                else:
+                    output = await state["call_tool"](tool, arguments)
+                if not output.get("is_error"):
+                    state["used_tool"] = True
+                replies.append(
+                    types.Part.from_function_response(
+                        name=call.name, response={"result": output}
+                    )
+                )
+            state["contents"].append(types.Content(role="user", parts=replies))
+            if repeated:
+                break
+
+        state["contents"].append(
+            types.Content(role="user", parts=[types.Part.from_text(text=FINAL_INSTRUCTION)])
+        )
+        response = await asyncio.to_thread(
+            self._generate,
+            state,
+            response_mime_type="application/json",
+            response_json_schema=WorkerResult.model_json_schema(),
+        )
+        result = json.loads(response.text)
+        state["contents"].append(response.candidates[0].content)
+        status = result.get("status")
+        if status == "needs_input":
+            self.pending_worker = state
+        elif status == "completed" and not state["used_tool"]:
+            raise RuntimeError("Worker did not complete a required tool call")
+        return result
 
     @property
     def worker_awaiting_input(self) -> bool:
         return self.pending_worker is not None
 
     async def continue_worker(self, user_message: str) -> dict[str, Any]:
+        from google.genai import types
+
         state = self.pending_worker
         if state is None:
             raise RuntimeError("Worker is not waiting for user input")
         self.pending_worker = None
-        state["transcript"] += (
-            "\n\nUser reply:\n" + user_message.strip()
-            + "\n\nContinue the same delegated task."
+        state["contents"].append(
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(
+                        text="User reply:\n" + user_message.strip()
+                        + "\n\nContinue the same delegated task."
+                    )
+                ],
+            )
         )
         return await self._run_worker(state)
 

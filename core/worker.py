@@ -40,31 +40,26 @@ class WorkerAI:
             raise RuntimeError("Worker is already waiting for user input")
         task = TaskRequest.model_validate(task)
         definitions = self.registry.resolve(task.skill_ids)
-        await self.registry.start_runtimes(definitions)
-        tools = await self.registry.list_tools(definitions)
         skill_instructions = "\n\n".join(
             f"## Skill: {definition.skill_id}\n\n{definition.instructions}"
             for definition in definitions
             if definition.instructions
         )
-        raw = await self.provider.execute_worker(
-            task=task,
-            system_prompt=self.system_prompt.strip(),
-            skill_instructions=skill_instructions,
-            definitions=definitions,
-            tools=tools,
-            call_tool=self.registry.call_tool,
-            registry=self.registry,
-            allowed_directories=self._allowed_directories(),
-        )
+        async with self.registry.task_sessions():
+            raw = await self.provider.execute_worker(
+                task=task,
+                system_prompt=self.system_prompt.strip(),
+                skill_instructions=skill_instructions,
+                definitions=definitions,
+                registry=self.registry,
+                allowed_directories=self._allowed_directories(),
+            )
         return WorkerResult.model_validate(raw)
 
     async def continue_with_user_input(self, user_message: str) -> WorkerResult:
-        raw = await self.provider.continue_worker(user_message)
+        async with self.registry.task_sessions():
+            raw = await self.provider.continue_worker(user_message)
         return WorkerResult.model_validate(raw)
-
-    async def close(self) -> None:
-        await self.provider.abort_worker()
 
     async def abort(self) -> None:
         await self.provider.abort_worker()

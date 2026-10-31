@@ -1,0 +1,7 @@
+{
+  "description": "อ่านตารางเวลา นัดหมาย กิจกรรม และช่วงเวลาว่างจาก Google Calendar รวมถึงเพิ่มกิจกรรมใหม่ในปฏิทินหลักของผู้ใช้",
+  "login_required": true,
+  "user_env": {
+    "AIPC_USER_DATA_DIR": "{user_dir}"
+  }
+}

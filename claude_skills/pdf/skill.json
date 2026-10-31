@@ -1,0 +1,12 @@
+{
+  "description": "สร้าง อ่าน ตรวจสอบ แก้ไข และแปลงไฟล์ PDF รวมถึงดึงข้อความ รวม แยก หรือจัดการหน้าเอกสาร PDF",
+  "builtin_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Glob",
+    "Grep"
+  ],
+  "working_directory": "documents"
+}

@@ -1,15 +1,10 @@
 import asyncio
+import os
 import time
 
 from core.controller import Controller
-from core.config import (
-    RUN_AI_PROVIDER,
-    RUN_CLAUDE_MODEL,
-    RUN_GEMINI_API_KEY,
-    RUN_GEMINI_MODEL,
-    RUN_MODEL_EFFORT,
-)
-from providers.qwen import DEFAULT_QWEN_MODEL
+import core.config  # noqa: F401  (loads .env)
+from providers.catalog import DEFAULT_PROVIDER
 from app.stt_adapter import GUISTTService
 from speech.wakeword import WakeWordService
 from speech.wakeword.config import WAKEWORD_NAME
@@ -17,16 +12,14 @@ from speech.tts import AudioQueue
 
 
 async def main() -> None:
-    models = {
-        "qwen": DEFAULT_QWEN_MODEL,
-        "gemini": RUN_GEMINI_MODEL,
-        "claude": RUN_CLAUDE_MODEL,
-    }
+    # Empty values fall back to the provider's own defaults.
+    provider = os.getenv("AI_PROVIDER", "").strip() or DEFAULT_PROVIDER
+    prefix = provider.upper()
     controller = Controller(
-        provider_name=RUN_AI_PROVIDER,
-        model=models.get(RUN_AI_PROVIDER, RUN_CLAUDE_MODEL),
-        effort=RUN_MODEL_EFFORT,
-        api_key=RUN_GEMINI_API_KEY if RUN_AI_PROVIDER == "gemini" else "",
+        provider_name=provider,
+        model=os.getenv(f"{prefix}_MODEL", ""),
+        effort=os.getenv("MODEL_EFFORT", ""),
+        api_key=os.getenv(f"{prefix}_API_KEY", ""),
     )
     stt = GUISTTService()
     audio_queue = AudioQueue()
@@ -38,7 +31,6 @@ async def main() -> None:
 
     try:
         await asyncio.gather(
-            controller.start(),
             asyncio.to_thread(stt.start),
             asyncio.to_thread(wakeword.start),
             audio_queue.start(),

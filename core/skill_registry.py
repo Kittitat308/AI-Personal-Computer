@@ -1,35 +1,79 @@
 import asyncio
+import json
 import os
 import socket
 import sys
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator
 
+import jsonschema
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-from core.config import PROJECT_ROOT, SKILLS_DIR
+from core.config import CLAUDE_SKILLS_DIR, PROJECT_ROOT, SKILLS_DIR
+from providers.catalog import provider_info
 
 
 @dataclass(frozen=True)
 class SkillDefinition:
+    """A skill described by the ``skill.json`` in its folder.
+
+    ``requires`` lists skills that always run together with this one,
+    ``free_ports`` names environment variables that receive a free port shared
+    with the skills that require this one, and ``user_env`` maps environment
+    variables to templates filled in with the signed-in user's data directory.
+    """
+
     skill_id: str
     description: str
-    directory: Path | None
-    tool_names: tuple[str, ...]
-    builtin_tool_names: tuple[str, ...] = ()
-    runtime_dependencies: tuple[str, ...] = ()
-    worker_dependencies: tuple[str, ...] = ()
+    directory: Path
+    requires: tuple[str, ...] = ()
+    builtin_tools: tuple[str, ...] = ()
     working_directory: Path | None = None
+    free_ports: tuple[str, ...] = ()
+    user_env: dict[str, str] = field(default_factory=dict)
+    login_required: bool = False
+
+    @property
+    def has_server(self) -> bool:
+        return (self.directory / "server.py").is_file()
 
     @property
     def instructions(self) -> str:
-        if self.directory is None:
+        instruction_file = self.directory / "SKILL.md"
+        if not instruction_file.is_file():
             return ""
 
-        return (self.directory / "SKILL.md").read_text(encoding="utf-8").strip()
+        return instruction_file.read_text(encoding="utf-8").strip()
+
+
+def load_definitions(root: Path) -> dict[str, SkillDefinition]:
+    definitions: dict[str, SkillDefinition] = {}
+    for manifest in sorted(root.glob("*/skill.json")):
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        working_directory = data.get("working_directory")
+        definitions[manifest.parent.name] = SkillDefinition(
+            skill_id=manifest.parent.name,
+            description=data["description"],
+            directory=manifest.parent,
+            requires=tuple(data.get("requires", ())),
+            builtin_tools=tuple(data.get("builtin_tools", ())),
+            working_directory=(
+                PROJECT_ROOT / working_directory if working_directory else None
+            ),
+            free_ports=tuple(data.get("free_ports", ())),
+            user_env=dict(data.get("user_env", {})),
+            login_required=bool(data.get("login_required", False)),
+        )
+    return definitions
+
+
+def find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return listener.getsockname()[1]
 
 
 @dataclass(frozen=True)
@@ -65,7 +109,7 @@ class SkillRuntime:
             if self.process is not None and self.process.returncode is None:
                 return
 
-            self.port = self._find_free_port()
+            self.port = find_free_port()
             environment = os.environ.copy()
             environment.update(self.environment_overrides)
             port_variable = f"{self.definition.skill_id.upper()}_MCP_PORT"
@@ -87,11 +131,6 @@ class SkillRuntime:
             except Exception:
                 await self.close()
                 raise
-
-    def _find_free_port(self) -> int:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-            listener.bind(("127.0.0.1", 0))
-            return listener.getsockname()[1]
 
     async def _wait_until_ready(self) -> None:
         for _ in range(100):
@@ -167,86 +206,24 @@ class SkillRuntime:
 
 class SkillRegistry:
     def __init__(self, provider_name: str = "claude"):
-        browser = SkillDefinition(
-            skill_id="browser",
-            description=(
-                "เปิดเว็บไซต์ ค้นหาเว็บผ่านหน้าต่างเบราว์เซอร์ ปิดแท็บเว็บไซต์ "
-                "ดูเว็บไซต์ที่เปิดอยู่ และปิดเบราว์เซอร์ที่ระบบควบคุม"
-            ),
-            directory=SKILLS_DIR / "browser",
-            tool_names=(
-                "open_website",
-                "search_web",
-                "close_tabs",
-                "get_open_websites",
-                "close_browser",
-            ),
-        )
-        gmail = SkillDefinition(
-            skill_id="gmail",
-            description=(
-                "อ่าน ค้นหา กรอง นับ สรุป และวิเคราะห์อีเมลในกล่องขาเข้า "
-                "ผ่าน Gmail API แบบอ่านอย่างเดียว โดยกรองตามช่วงวันที่ "
-                "สถานะอ่าน หรือที่อยู่อีเมลผู้ส่งแบบเต็มได้"
-            ),
-            directory=SKILLS_DIR / "gmail",
-            tool_names=("read_emails",),
-        )
-        calendar = SkillDefinition(
-            skill_id="calendar",
-            description=(
-                "อ่านตารางเวลา นัดหมาย กิจกรรม และช่วงเวลาว่างจาก Google Calendar "
-                "รวมถึงเพิ่มกิจกรรมใหม่ในปฏิทินหลักของผู้ใช้"
-            ),
-            directory=SKILLS_DIR / "calendar",
-            tool_names=("read_events", "create_event"),
-        )
-        youtube = SkillDefinition(
-            skill_id="youtube",
-            description=(
-                "ค้นหาวิดีโอหรือช่องบน YouTube ผ่าน YouTube Data API และเปิดวิดีโอ "
-                "ในแท็บใหม่หรือแท็บ YouTube ที่ระบุ หากต้องเลือกแท็บเดิมให้ใช้ร่วมกับ "
-                "browser เพื่อดู tab_id ก่อน"
-            ),
-            directory=SKILLS_DIR / "youtube",
-            tool_names=("search_youtube", "open_video"),
-            runtime_dependencies=("browser",),
-            worker_dependencies=("browser",),
-        )
-        admin = SkillDefinition(
-            skill_id="admin",
-            description=(
-                "จัดการ ตั้งค่า ตรวจสอบ วินิจฉัย และเปลี่ยนแปลงระบบปฏิบัติการหรือ"
-                "โปรแกรมที่ติดตั้ง เช่น ติดตั้ง อัปเดต ซ่อมแซม ตั้งค่า หรือถอนโปรแกรม "
-                "ตรวจสอบฮาร์ดแวร์ พื้นที่จัดเก็บ หน่วยความจำ โปรเซส บริการ เครือข่าย "
-                "และบันทึกระบบ รวมถึงเรียกใช้คำสั่งหรือสคริปต์เบื้องหลัง ใช้เมื่อคำขอ"
-                "ต้องเข้าถึงระบบโดยตรงและไม่มี Skill เฉพาะรองรับ และอย่าใช้ร่วมกับ "
-                "Skill อื่นในงานเดียวกัน"
-            ),
-            directory=None,
-            tool_names=(),
-        )
-        self.central_definitions = {
-            browser.skill_id: browser,
-            gmail.skill_id: gmail,
-            calendar.skill_id: calendar,
-            youtube.skill_id: youtube,
-            admin.skill_id: admin,
-        }
+        self.central_definitions = load_definitions(SKILLS_DIR)
+        self.claude_definitions = load_definitions(CLAUDE_SKILLS_DIR)
         self.definitions: dict[str, SkillDefinition] = {}
+        self._session_stack: AsyncExitStack | None = None
+        self._open_sessions: dict[str, ClientSession] = {}
         self.set_provider(provider_name)
         self.runtimes = {
             skill_id: SkillRuntime(definition)
             for skill_id, definition in self.central_definitions.items()
-            if definition.tool_names
+            if definition.has_server
         }
-        browser_bridge_port = self.runtimes["browser"]._find_free_port()
-        bridge_environment = {
-            "BROWSER_BRIDGE_HOST": "127.0.0.1",
-            "BROWSER_BRIDGE_PORT": str(browser_bridge_port),
+        shared_environment = {
+            skill_id: {name: str(find_free_port()) for name in definition.free_ports}
+            for skill_id, definition in self.central_definitions.items()
         }
-        self.runtimes["browser"].environment_overrides.update(bridge_environment)
-        self.runtimes["youtube"].environment_overrides.update(bridge_environment)
+        for skill_id, runtime in self.runtimes.items():
+            for owner in (*runtime.definition.requires, skill_id):
+                runtime.environment_overrides.update(shared_environment[owner])
 
     def set_provider(self, provider_name: str) -> None:
         definitions = {
@@ -254,39 +231,41 @@ class SkillRegistry:
             for skill_id, definition in self.central_definitions.items()
             if skill_id != "admin"
         }
-        if provider_name.strip().casefold() == "claude":
-            from claude_skills import claude_skill_definitions
-
-            for definition in claude_skill_definitions():
-                definitions[definition.skill_id] = definition
+        if provider_info(provider_name).claude_skills:
+            definitions.update(self.claude_definitions)
         definitions["admin"] = self.central_definitions["admin"]
         self.definitions = definitions
 
     async def set_active_user(self, user_id: int | None) -> None:
-        users_directory = PROJECT_ROOT / "data" / "users"
-        user_directory = users_directory / (
-            str(user_id) if user_id is not None else "default"
-        )
-
-        browser = self.runtimes["browser"]
-        browser_value = str((user_directory / "browser_data").resolve())
-        if browser.environment_overrides.get("AIPC_BROWSER_DATA_DIR") != browser_value:
-            await browser.close()
-            browser.environment_overrides["AIPC_BROWSER_DATA_DIR"] = browser_value
-
-        # Google tokens live directly in the signed-in user's data directory.
-        # Without a user no directory is given, so these skills cannot reuse
-        # another account's token.
-        user_value = str(user_directory.resolve()) if user_id is not None else None
-        for skill_id in ("gmail", "calendar"):
-            runtime = self.runtimes[skill_id]
-            if runtime.environment_overrides.get("AIPC_USER_DATA_DIR") == user_value:
+        user_directory = (
+            PROJECT_ROOT / "data" / "users" / (str(user_id) if user_id is not None else "default")
+        ).resolve()
+        for runtime in self.runtimes.values():
+            definition = runtime.definition
+            if not definition.user_env:
+                continue
+            # A skill that needs a login gets no directory without a user, so it
+            # cannot reuse another account's token.
+            values = (
+                {}
+                if user_id is None and definition.login_required
+                else {
+                    name: str(Path(template.format(user_dir=user_directory)))
+                    for name, template in definition.user_env.items()
+                }
+            )
+            current = {
+                name: runtime.environment_overrides.get(name)
+                for name in definition.user_env
+            }
+            if current == {name: values.get(name) for name in definition.user_env}:
                 continue
             await runtime.close()
-            if user_value is None:
-                runtime.environment_overrides.pop("AIPC_USER_DATA_DIR", None)
-            else:
-                runtime.environment_overrides["AIPC_USER_DATA_DIR"] = user_value
+            for name in definition.user_env:
+                if name in values:
+                    runtime.environment_overrides[name] = values[name]
+                else:
+                    runtime.environment_overrides.pop(name, None)
 
     def catalog(self) -> str:
         return "\n".join(
@@ -308,7 +287,7 @@ class SkillRegistry:
 
             resolved_ids.append(skill_id)
 
-            for dependency_id in self.definitions[skill_id].worker_dependencies:
+            for dependency_id in self.definitions[skill_id].requires:
                 add_with_dependencies(dependency_id)
 
         for skill_id in skill_ids:
@@ -318,10 +297,6 @@ class SkillRegistry:
 
     async def start_runtimes(self, definitions: list[SkillDefinition]) -> None:
         for definition in definitions:
-            for dependency_id in definition.runtime_dependencies:
-                dependency = self.runtimes[dependency_id]
-                await dependency.start()
-
             runtime = self.runtimes.get(definition.skill_id)
 
             if runtime is not None:
@@ -343,6 +318,45 @@ class SkillRegistry:
                 await session.initialize()
                 yield session
 
+    @asynccontextmanager
+    async def task_sessions(self) -> AsyncIterator[None]:
+        """Keep MCP sessions open for every tool call made inside this block.
+
+        The sessions close in the task that opened them, so a block must not
+        span several asyncio tasks.
+        """
+        try:
+            async with AsyncExitStack() as stack:
+                self._session_stack = stack
+                self._open_sessions = {}
+                try:
+                    yield
+                finally:
+                    self._session_stack = None
+                    self._open_sessions = {}
+        except BaseExceptionGroup as group:
+            # The MCP client's task groups wrap any error raised inside this
+            # block; surface the original error instead of the wrapper.
+            error: BaseException = group
+            while isinstance(error, BaseExceptionGroup) and len(error.exceptions) == 1:
+                error = error.exceptions[0]
+            if error is group:
+                raise
+            raise error from None
+
+    async def _use_session(self, skill_id: str, action):
+        if self._session_stack is None:
+            async with self._session(skill_id) as session:
+                return await action(session)
+
+        session = self._open_sessions.get(skill_id)
+        if session is None:
+            session = await self._session_stack.enter_async_context(
+                self._session(skill_id)
+            )
+            self._open_sessions[skill_id] = session
+        return await action(session)
+
     async def list_tools(
         self,
         definitions: list[SkillDefinition],
@@ -351,17 +365,18 @@ class SkillRegistry:
         for definition in definitions:
             if definition.skill_id not in self.runtimes:
                 continue
-            async with self._session(definition.skill_id) as session:
-                result = await session.list_tools()
-                tools.extend(
-                    ToolDefinition(
-                        skill_id=definition.skill_id,
-                        name=tool.name,
-                        description=tool.description or "",
-                        input_schema=tool.input_schema,
-                    )
-                    for tool in result.tools
+            result = await self._use_session(
+                definition.skill_id, lambda session: session.list_tools()
+            )
+            tools.extend(
+                ToolDefinition(
+                    skill_id=definition.skill_id,
+                    name=tool.name,
+                    description=tool.description or "",
+                    input_schema=tool.input_schema,
                 )
+                for tool in result.tools
+            )
         return tools
 
     async def call_tool(
@@ -369,9 +384,28 @@ class SkillRegistry:
         tool: ToolDefinition,
         arguments: dict[str, Any],
     ) -> dict[str, Any]:
-        async with self._session(tool.skill_id) as session:
-            result = await session.call_tool(tool.name, arguments)
-            return result.model_dump(mode="json", exclude_none=True)
+        # Every model gets the same answer for invalid arguments: an error
+        # result it can correct, without running the tool.
+        validator = jsonschema.validators.validator_for(tool.input_schema)
+        problems = [
+            problem.message
+            for problem in validator(tool.input_schema).iter_errors(arguments)
+        ]
+        if problems:
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Invalid arguments for {tool.name}: "
+                        + "; ".join(problems),
+                    }
+                ],
+                "is_error": True,
+            }
+        result = await self._use_session(
+            tool.skill_id, lambda session: session.call_tool(tool.name, arguments)
+        )
+        return result.model_dump(mode="json", exclude_none=True)
 
     async def close(self) -> None:
         for runtime in reversed(list(self.runtimes.values())):

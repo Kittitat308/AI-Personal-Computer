@@ -9,24 +9,7 @@ from app.ui_dialogs import (
 )
 
 
-AI_PROVIDER_LABELS = (("Qwen", "qwen"), ("Gemini", "gemini"), ("Claude", "claude"))
-GEMINI_MODELS = (
-    ("gemini-3.5-flash-lite", "gemini-3.5-flash-lite"),
-    ("gemini-3.8-flash", "gemini-3.8-flash"),
-)
-CLAUDE_MODELS = (
-    ("Opus 5.5", "opus"),
-    ("Sonnet 5.5", "sonnet"),
-    ("Fable 5.1", "fable"),
-    ("Haiku 5.5", "haiku"),
-)
-CLAUDE_EFFORTS = (
-    ("Low", "low"),
-    ("Medium", "medium"),
-    ("High", "high"),
-    ("Extra", "xhigh"),
-    ("Max", "max"),
-)
+from providers.catalog import PROVIDERS
 
 
 def _label_for(choices, value: str) -> str:
@@ -640,8 +623,8 @@ class ChatPage(QWidget):
 
     def _show_provider_menu(self) -> None:
         menu = QMenu(self)
-        for label, provider in AI_PROVIDER_LABELS:
-            action = menu.addAction(label)
+        for provider, info in PROVIDERS.items():
+            action = menu.addAction(info.label)
             action.setIcon(self._choice_icon(provider == self._provider))
             action.triggered.connect(
                 lambda _checked=False, selected=provider: self._choose_provider(
@@ -656,14 +639,12 @@ class ChatPage(QWidget):
 
     def _show_model_menu(self) -> None:
         settings = self._ai_settings
-        if settings is None or self._provider not in ("gemini", "claude"):
+        if settings is None or not self._model_choices():
             return
-        if self._provider == "claude":
-            choices, current = CLAUDE_MODELS, settings.claude_model
-        else:
-            choices, current = GEMINI_MODELS, settings.gemini_model
+        info = PROVIDERS[self._provider]
+        current = getattr(settings, f"{info.name}_model")
         menu = QMenu(self)
-        for label, value in choices:
+        for label, value in info.models:
             action = menu.addAction(label)
             action.setIcon(self._choice_icon(value == current))
             action.triggered.connect(
@@ -671,12 +652,12 @@ class ChatPage(QWidget):
                     self.model_changed.emit(selected) if selected != now else None
                 )
             )
-        if self._provider == "claude":
+        if info.efforts:
             menu.addSeparator()
-            effort = _label_for(CLAUDE_EFFORTS, settings.model_effort)
+            effort = _label_for(info.efforts, settings.model_effort)
             effort_menu = menu.addMenu(f"Effort · {effort}")
             effort_menu.setIcon(self._choice_icon(False))
-            for label, value in CLAUDE_EFFORTS:
+            for label, value in info.efforts:
                 action = effort_menu.addAction(label)
                 action.setIcon(self._choice_icon(value == settings.model_effort))
                 action.triggered.connect(
@@ -688,6 +669,10 @@ class ChatPage(QWidget):
                 )
         self._popup_above(self.model_button, menu)
 
+    def _model_choices(self) -> tuple:
+        info = PROVIDERS.get(self._provider or "")
+        return info.models if info else ()
+
     def set_model_locked(self, locked: bool) -> None:
         self._model_locked = locked
         self._apply_model_controls()
@@ -695,27 +680,20 @@ class ChatPage(QWidget):
     def _apply_model_controls(self) -> None:
         changeable = not self._busy and not self._model_locked
         self.ai_provider_button.setEnabled(changeable)
-        self.model_button.setEnabled(
-            changeable and self._provider in ("gemini", "claude")
-        )
+        self.model_button.setEnabled(changeable and bool(self._model_choices()))
 
     def _refresh_model_buttons(self) -> None:
         provider = self._provider
         settings = self._ai_settings
-        self.ai_provider_button.set_label(
-            _label_for(AI_PROVIDER_LABELS, provider) if provider else "เลือก AI"
-        )
-        if provider is None or settings is None:
+        info = PROVIDERS.get(provider or "")
+        self.ai_provider_button.set_label(info.label if info else "เลือก AI")
+        if info is None or settings is None:
             label = "เลือกโมเดล"
-        elif provider == "qwen":
-            label = settings.qwen_model
-        elif provider == "gemini":
-            label = settings.gemini_model
         else:
-            label = (
-                f"{_label_for(CLAUDE_MODELS, settings.claude_model)}"
-                f" · {_label_for(CLAUDE_EFFORTS, settings.model_effort)}"
-            )
+            label = _label_for(info.models, getattr(settings, f"{info.name}_model"))
+            if info.efforts:
+                label += f" · {_label_for(info.efforts, settings.model_effort)}"
+
         self.model_button.set_label(label)
         self._apply_model_controls()
 
