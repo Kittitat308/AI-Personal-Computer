@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
     QButtonGroup,
+    QComboBox,
     QDialog,
     QFrame,
     QGridLayout,
@@ -78,6 +79,10 @@ QPushButton#danger:hover, QPushButton#cancel:hover { background: #ad2735; border
 QPushButton:disabled { background: #0b1726; color: #71859f; border: 1px solid #344c68; }
 QPushButton#primary:disabled { background: #434c57; color: #aeb8c4; border: 1px solid #697481; }
 QLineEdit { background: #13243a; border: 1px solid #526f91; border-radius: 14px; padding: 12px 16px; min-height: 26px; }
+QComboBox { background:#13243a; border:1px solid #526f91; border-radius:14px; padding:10px 14px; min-height:26px; }
+QComboBox:hover { border-color:#2e9bff; background:#17304d; }
+QComboBox:disabled { color:#8b98a8; background:#46515f; border-color:#687484; }
+QComboBox QAbstractItemView { background:#0b1726; color:#f3f7ff; selection-background-color:#0868c8; }
 QLineEdit:focus { border-color: #2298ff; }
 QPlainTextEdit { background: #13243a; border: 1px solid #526f91; border-radius: 14px; padding: 10px 16px; }
 QPlainTextEdit:focus { border-color: #2298ff; }
@@ -552,3 +557,53 @@ class PermissionModeButton(QAbstractButton):
             QPointF(arrow_x + 6, arrow_y + 3),
         )
 
+
+
+class PillMenuButton(QAbstractButton):
+    """Compact rounded button with a chevron that opens a menu."""
+
+    def __init__(self, label: str = "", parent=None):
+        super().__init__(parent)
+        self.label = ""
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(32)
+        self.set_label(label)
+
+    def set_label(self, label: str) -> None:
+        self.label = label
+        text_width = QFontMetrics(self.font()).horizontalAdvance(label)
+        self.setFixedWidth(min(max(text_width + 46, 72), 280))
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        if not self.isEnabled():
+            background = QColor("#0c1829")
+            border = QColor("#26384f")
+            foreground = QColor("#62748c")
+        else:
+            hovered = self.underMouse()
+            background = QColor("#15304f") if hovered else QColor("#102238")
+            border = QColor("#2e9bff") if hovered else QColor("#36506f")
+            foreground = QColor("#e6efff")
+        painter.setPen(QPen(border, 1.2))
+        painter.setBrush(background)
+        radius = self.height() / 2 - 1
+        painter.drawRoundedRect(
+            QRectF(0.6, 0.6, self.width() - 1.2, self.height() - 1.2),
+            radius,
+            radius,
+        )
+        painter.setPen(foreground)
+        text_rect = self.rect().adjusted(14, 0, -30, 0)
+        text = QFontMetrics(self.font()).elidedText(
+            self.label, Qt.ElideRight, text_rect.width()
+        )
+        painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, text)
+        center_x = self.width() - 18
+        center_y = self.height() / 2
+        painter.setPen(QPen(foreground, 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawLine(QPointF(center_x - 4, center_y - 2), QPointF(center_x, center_y + 2))
+        painter.drawLine(QPointF(center_x, center_y + 2), QPointF(center_x + 4, center_y - 2))

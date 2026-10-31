@@ -1,250 +1,101 @@
-import os
+from __future__ import annotations
+
 import re
-import subprocess
 import threading
 import time
-from pathlib import Path
 
-import requests
+import numpy as np
+import sherpa_onnx
 
 from speech.stt.config import (
-    CANCEL_REQUEST_TIMEOUT_SECONDS,
-    CANCEL_WAIT_TIMEOUT_SECONDS,
-    HOST,
-    INFERENCE_TIMEOUT_SECONDS,
-    LANGUAGE,
-    MODEL_PATH,
-    PORT,
-    SERVER_START_TIMEOUT_SECONDS,
-    THREADS,
-    WARMUP_AUDIO_PATH,
-    WARMUP_TIMEOUT_SECONDS,
-    WHISPER_DIR,
-    WHISPER_EXECUTABLE,
+    DECODER_PATH,
+    ENCODER_PATH,
+    FEATURE_DIM,
+    JOINER_PATH,
+    NUM_THREADS,
+    SAMPLE_RATE,
+    TOKENS_PATH,
 )
 
 
 class STTService:
+    """In-process Thai speech recognition powered by Sherpa-ONNX Zipformer."""
+
     def __init__(self) -> None:
-        self.server_url = f"http://{HOST}:{PORT}"
-        self.inference_url = f"{self.server_url}/inference"
-        self.cancel_url = f"{self.server_url}/cancel"
-        self.status_url = f"{self.server_url}/status"
-        self.server_process: subprocess.Popen | None = None
-        self.owns_server = False
-        self.warmed_up = False
+        self.recognizer: sherpa_onnx.OfflineRecognizer | None = None
         self._cancel_requested = threading.Event()
+        self._decode_lock = threading.Lock()
 
     def start(self) -> None:
-        if self._server_is_ready():
-            self._warm_up()
+        if self.recognizer is not None:
             return
 
         self._validate_files()
-        print("กำลังโหลด Thonburian Whisper Distilled Small Q8 ด้วย CPU...")
+        print("กำลังโหลด Sherpa-ONNX Zipformer Thai INT8 ด้วย CPU...")
         started = time.perf_counter()
-
-        command = [
-            str(WHISPER_EXECUTABLE),
-            "--model",
-            str(MODEL_PATH),
-            "--host",
-            HOST,
-            "--port",
-            str(PORT),
-            "--threads",
-            str(THREADS),
-            "--language",
-            LANGUAGE,
-            "--no-gpu",
-            "--no-fallback",
-            "--no-timestamps",
-            "--suppress-nst",
-            "--best-of",
-            "1",
-            "--max-context",
-            "0",
-        ]
-
-        startup_flags = 0
-        if os.name == "nt":
-            startup_flags = subprocess.CREATE_NO_WINDOW
-
-        self.server_process = subprocess.Popen(
-            command,
-            cwd=WHISPER_DIR,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=startup_flags,
+        self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
+            encoder=str(ENCODER_PATH),
+            decoder=str(DECODER_PATH),
+            joiner=str(JOINER_PATH),
+            tokens=str(TOKENS_PATH),
+            num_threads=NUM_THREADS,
+            sample_rate=SAMPLE_RATE,
+            feature_dim=FEATURE_DIM,
+            decoding_method="greedy_search",
+            provider="cpu",
         )
-        self.owns_server = True
-
-        deadline = time.monotonic() + SERVER_START_TIMEOUT_SECONDS
-        while time.monotonic() < deadline:
-            if self.server_process.poll() is not None:
-                raise RuntimeError("Whisper Server ปิดตัวระหว่างโหลดโมเดล")
-
-            if self._server_is_ready():
-                load_elapsed = time.perf_counter() - started
-                print(f"โหลดโมเดลสำเร็จ: {load_elapsed:.2f} วินาที")
-                self._warm_up()
-                return
-
-            time.sleep(0.25)
-
-        self.close()
-        raise TimeoutError("รอ Whisper Server พร้อมใช้งานนานเกินไป")
+        print(f"โหลดโมเดลสำเร็จ: {time.perf_counter() - started:.2f} วินาที")
+        print("STT พร้อมใช้งาน")
 
     def prepare_transcription(self) -> None:
-        """Mark the next transcription as active before it enters a worker thread."""
         self._cancel_requested.clear()
 
     def request_cancel(self) -> None:
-        """Immediately mark the active transcription so late results are discarded."""
         self._cancel_requested.set()
 
-    def close(self) -> None:
-        if not self.owns_server or self.server_process is None:
-            return
-
-        if self.server_process.poll() is None:
-            self.server_process.terminate()
-            try:
-                self.server_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.server_process.kill()
-                self.server_process.wait()
-
-        self.server_process = None
-        self.owns_server = False
-        self.warmed_up = False
-
     def cancel_current(self) -> None:
-        """Cancel active inference; calling this while idle is harmless."""
+        """Discard the active result; native decoding is short and finishes in place."""
         self.request_cancel()
-        if not self._server_is_ready():
-            return
-        try:
-            self._cancel_inference()
-        except Exception as error:
-            print(f"ยกเลิก STT ไม่สำเร็จ กำลังเริ่มเซิร์ฟเวอร์ใหม่: {error}")
-            self._restart_server()
+
+    def close(self) -> None:
+        self.request_cancel()
+        with self._decode_lock:
+            self.recognizer = None
+
+    def transcribe_audio(self, audio: np.ndarray) -> str:
+        samples = np.ascontiguousarray(
+            np.asarray(audio, dtype=np.float32).reshape(-1)
+        )
+        if samples.size == 0 or self._cancel_requested.is_set():
+            return ""
+        if self.recognizer is None:
+            raise RuntimeError("STT ยังไม่ได้โหลดโมเดล")
+
+        print("กำลังแปลงเสียงเป็นข้อความ...")
+        started = time.perf_counter()
+        with self._decode_lock:
+            if self._cancel_requested.is_set() or self.recognizer is None:
+                return ""
+            stream = self.recognizer.create_stream()
+            stream.accept_waveform(SAMPLE_RATE, samples)
+            self.recognizer.decode_stream(stream)
+            text = stream.result.text.strip()
+
+        if self._cancel_requested.is_set():
+            return ""
+        print(f"STT: {time.perf_counter() - started:.2f} วินาที")
+        return text
 
     @staticmethod
     def is_shutdown_command(text: str) -> bool:
         normalized = re.sub(r"[\s.!?…。、，！？]+", "", text).casefold()
         return "ปิดระบบ" in normalized
 
-    def _transcribe(self, audio_path: Path) -> str:
-        if self._cancel_requested.is_set():
-            return ""
-        print("กำลังแปลงเสียงเป็นข้อความ...")
-        started = time.perf_counter()
-
-        try:
-            with audio_path.open("rb") as audio_file:
-                response = requests.post(
-                    self.inference_url,
-                    files={"file": ("input.wav", audio_file, "audio/wav")},
-                    data={"language": LANGUAGE, "response_format": "json"},
-                    timeout=INFERENCE_TIMEOUT_SECONDS,
-                )
-            response.raise_for_status()
-        except requests.exceptions.Timeout as error:
-            if self._cancel_requested.is_set():
-                return ""
-            self._recover_from_timeout()
-            raise TimeoutError(
-                f"STT ใช้เวลาเกิน {INFERENCE_TIMEOUT_SECONDS:.0f} วินาทีและถูกยกเลิก"
-            ) from error
-        except requests.RequestException as error:
-            if self._cancel_requested.is_set():
-                return ""
-            self._recover_from_server_error()
-            raise RuntimeError(f"Whisper Server ตอบกลับไม่สำเร็จ: {error}") from error
-
-        if self._cancel_requested.is_set():
-            return ""
-
-        try:
-            text = str(response.json().get("text", "")).strip()
-        except (ValueError, AttributeError):
-            text = response.text.strip()
-
-        elapsed = time.perf_counter() - started
-        print(f"STT: {elapsed:.2f} วินาที")
-        return text
-
-    def _recover_from_timeout(self) -> None:
-        try:
-            self._cancel_inference()
-        except Exception as error:
-            print(f"ยกเลิก STT ไม่สำเร็จ กำลังเริ่มเซิร์ฟเวอร์ใหม่: {error}")
-            self._restart_server()
-
-    def _recover_from_server_error(self) -> None:
-        self._restart_server()
-
-    def _cancel_inference(self) -> None:
-        response = requests.post(
-            self.cancel_url,
-            timeout=CANCEL_REQUEST_TIMEOUT_SECONDS,
-        )
-        response.raise_for_status()
-
-        deadline = time.monotonic() + CANCEL_WAIT_TIMEOUT_SECONDS
-        while time.monotonic() < deadline:
-            status_response = requests.get(
-                self.status_url,
-                timeout=CANCEL_REQUEST_TIMEOUT_SECONDS,
-            )
-            status_response.raise_for_status()
-            if status_response.json().get("status") == "idle":
-                return
-            time.sleep(0.05)
-
-        raise TimeoutError("Whisper Server ไม่กลับสู่สถานะ idle หลังยกเลิก")
-
-    def _restart_server(self) -> None:
-        self.close()
-        self.start()
-
-    def _warm_up(self) -> None:
-        if self.warmed_up:
-            return
-
-        print("กำลัง warm-up STT...")
-        started = time.perf_counter()
-        with WARMUP_AUDIO_PATH.open("rb") as audio_file:
-            response = requests.post(
-                self.inference_url,
-                files={"file": ("warmup.wav", audio_file, "audio/wav")},
-                data={"language": LANGUAGE, "response_format": "json"},
-                timeout=WARMUP_TIMEOUT_SECONDS,
-            )
-        response.raise_for_status()
-
-        self.warmed_up = True
-        elapsed = time.perf_counter() - started
-        print(f"warm-up สำเร็จ: {elapsed:.2f} วินาที")
-        print("STT พร้อมใช้งาน")
-
-    def _server_is_ready(self) -> bool:
-        try:
-            requests.get(self.server_url, timeout=0.5)
-            return True
-        except requests.RequestException:
-            return False
-
     @staticmethod
     def _validate_files() -> None:
         missing = [
             path
-            for path in (
-                WHISPER_EXECUTABLE,
-                MODEL_PATH,
-                WARMUP_AUDIO_PATH,
-            )
+            for path in (ENCODER_PATH, DECODER_PATH, JOINER_PATH, TOKENS_PATH)
             if not path.is_file()
         ]
         if missing:

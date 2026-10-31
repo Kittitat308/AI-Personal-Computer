@@ -10,11 +10,40 @@ class ChatMixin:
             dialog.show()
             errors: list[str] = []
             user_id = self.state.current_user_id
+            self.ai_model_unselected = False
             try:
                 await self.controller.set_active_user(user_id)
             except Exception as error:
                 errors.append(f"เตรียมข้อมูลผู้ใช้ไม่สำเร็จ: {error}")
             try:
+                ai_settings = await asyncio.to_thread(
+                    self.database.get_ai_settings,
+                    user_id,
+                )
+                api_key = await asyncio.to_thread(
+                    self.database.get_api_key,
+                    user_id,
+                    "gemini",
+                )
+                model = self._model_for_provider(ai_settings, ai_settings.provider)
+                try:
+                    await self.controller.configure_provider(
+                        ai_settings.provider,
+                        model,
+                        ai_settings.model_effort,
+                        api_key,
+                    )
+                except Exception:
+                    self.ai_model_unselected = True
+                    self.window.chat.set_ai_unselected()
+                    self._load_ai_settings_page(ai_settings, api_key)
+                    raise
+                self.ai_model_unselected = False
+                self.window.chat.set_ai_models(
+                    ai_settings,
+                    ai_settings.provider,
+                )
+                self._load_ai_settings_page(ai_settings, api_key)
                 await self.controller.reset_conversation(start=True)
             except Exception as error:
                 errors.append(f"เริ่มเซสชัน AI ไม่สำเร็จ: {error}")
@@ -86,6 +115,7 @@ class ChatMixin:
                 self._reset_attachment_cache()
                 self._reset_input_attachment_cache()
                 self._refresh_settings()
+                self.window.chat.set_model_locked(False)
 
     def _on_typed_message(self, text: str, attachments: list[str]) -> None:
         if self.current_operation is not None and not self.current_operation.done():
@@ -94,6 +124,202 @@ class ChatMixin:
             self.process_message(text, attachments=attachments)
         )
         self.current_operation.add_done_callback(self._operation_finished)
+
+    @staticmethod
+    def _model_for_provider(settings, provider: str) -> str:
+        return {
+            "qwen": settings.qwen_model,
+            "gemini": settings.gemini_model,
+            "claude": settings.claude_model,
+        }[provider]
+
+    def _load_ai_settings_page(self, settings, api_key: str) -> None:
+        self.window.settings.load_values(
+            {
+                "qwen_model": settings.qwen_model,
+                "gemini_model": settings.gemini_model,
+                "claude_model": settings.claude_model,
+                "gemini_api_key": api_key,
+                "model_effort": settings.model_effort,
+            }
+        )
+
+    def open_settings(self) -> None:
+        if not self.state.logged_in:
+            return
+        settings = self.database.get_ai_settings(self.state.current_user_id)
+        api_key = self.database.get_api_key(
+            self.state.current_user_id,
+            "gemini",
+        )
+        self._load_ai_settings_page(settings, api_key)
+        self.window.show_settings()
+
+    def _on_ai_provider_changed(self, provider: str) -> None:
+        if not self.state.logged_in:
+            return
+        asyncio.create_task(self._switch_ai_provider(provider))
+
+    def _on_model_effort_changed(self, effort: str) -> None:
+        self._start_model_switch(effort=effort)
+
+    def _on_model_changed(self, model: str) -> None:
+        self._start_model_switch(model=model)
+
+    def _start_model_switch(
+        self,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> None:
+        if (
+            not self.state.logged_in
+            or self.ai_model_unselected
+            or self.controller.provider_name not in ("gemini", "claude")
+        ):
+            return
+        asyncio.create_task(self._switch_model_selection(model, effort))
+
+    async def _switch_model_selection(
+        self,
+        model: str | None,
+        effort: str | None,
+    ) -> None:
+        user_id = self.state.current_user_id
+        if user_id is None:
+            return
+        provider = self.controller.provider_name
+        try:
+            settings = await asyncio.to_thread(
+                self.database.get_ai_settings,
+                user_id,
+            )
+            current_model = self._model_for_provider(settings, provider)
+            new_model = model or current_model
+            new_effort = effort or settings.model_effort
+            if new_model == current_model and new_effort == settings.model_effort:
+                return
+            api_key = await asyncio.to_thread(
+                self.database.get_api_key,
+                user_id,
+                "gemini",
+            )
+            await self.controller.configure_provider(
+                provider,
+                new_model,
+                new_effort,
+                api_key,
+            )
+            await asyncio.to_thread(
+                self.database.update_ai_settings,
+                user_id,
+                provider=provider,
+                qwen_model=settings.qwen_model,
+                gemini_model=new_model if provider == "gemini" else settings.gemini_model,
+                claude_model=new_model if provider == "claude" else settings.claude_model,
+                model_effort=new_effort,
+            )
+            updated = await asyncio.to_thread(
+                self.database.get_ai_settings,
+                user_id,
+            )
+            self.window.chat.set_ai_models(updated, provider)
+            self.window.chat.clear_messages(keep_input=True)
+        except Exception as error:
+            settings = await asyncio.to_thread(
+                self.database.get_ai_settings,
+                user_id,
+            )
+            self.window.chat.set_ai_models(settings, self.controller.provider_name)
+            self._show_error(f"เปลี่ยนโมเดลไม่สำเร็จ: {error}")
+
+    async def _switch_ai_provider(self, provider: str) -> None:
+        user_id = self.state.current_user_id
+        if user_id is None or (
+            provider == self.controller.provider_name
+            and not self.ai_model_unselected
+        ):
+            return
+        dialog = LoadingDialog(
+            "กำลังเปลี่ยน AI",
+            "กำลังโหลดโมเดลและเริ่มเซสชันใหม่...",
+            self.window,
+        )
+        dialog.show()
+        try:
+            settings = await asyncio.to_thread(
+                self.database.get_ai_settings,
+                user_id,
+            )
+            api_key = await asyncio.to_thread(
+                self.database.get_api_key,
+                user_id,
+                "gemini",
+            )
+            await self.controller.configure_provider(
+                provider,
+                self._model_for_provider(settings, provider),
+                settings.model_effort,
+                api_key,
+            )
+            await asyncio.to_thread(
+                self.database.update_ai_settings,
+                user_id,
+                provider=provider,
+                qwen_model=settings.qwen_model,
+                gemini_model=settings.gemini_model,
+                claude_model=settings.claude_model,
+                model_effort=settings.model_effort,
+            )
+            updated = await asyncio.to_thread(
+                self.database.get_ai_settings,
+                user_id,
+            )
+            self.ai_model_unselected = False
+            self.window.chat.set_ai_models(updated, provider)
+            self.window.chat.clear_messages(keep_input=True)
+        except Exception as error:
+            if self.ai_model_unselected:
+                self.window.chat.set_ai_unselected()
+            else:
+                self.window.chat.set_ai_provider(self.controller.provider_name)
+            self._show_error(f"เปลี่ยน AI ไม่สำเร็จ: {error}")
+        finally:
+            dialog.close()
+
+    def _save_ai_settings(self, values: dict) -> None:
+        if not self.state.logged_in:
+            return
+        asyncio.create_task(self._save_ai_settings_async(values))
+
+    async def _save_ai_settings_async(self, values: dict) -> None:
+        user_id = self.state.current_user_id
+        if user_id is None:
+            return
+        try:
+            await asyncio.to_thread(
+                self.database.set_api_key,
+                user_id,
+                "gemini",
+                values["gemini_api_key"],
+            )
+            settings = await asyncio.to_thread(
+                self.database.get_ai_settings,
+                user_id,
+            )
+            if self.controller.provider_name == "gemini":
+                await self.controller.configure_provider(
+                    "gemini",
+                    settings.gemini_model,
+                    settings.model_effort,
+                    values["gemini_api_key"],
+                )
+            if not self.ai_model_unselected:
+                self.window.chat.set_ai_models(
+                    settings, self.controller.provider_name
+                )
+            self.window.show_chat()
+        except Exception as error:
+            self._show_error(f"บันทึกการตั้งค่า AI ไม่สำเร็จ: {error}")
 
     def _on_utterance(self, audio) -> None:
         if self.state.assistant_busy or not self.state.logged_in:
@@ -135,6 +361,9 @@ class ChatMixin:
         attachments: list[str] | None = None,
     ) -> None:
         if self.state.assistant_busy and not busy_already:
+            return
+        if self.ai_model_unselected:
+            self._show_error("กรุณาเลือกโมเดลก่อนใช้งาน")
             return
         self.state.assistant_busy = True
         self.window.chat.set_busy(True, "AI กำลังประมวลผล")
@@ -204,6 +433,12 @@ class ChatMixin:
             if not self.operation_canceling:
                 self.state.assistant_busy = False
                 self.window.chat.set_busy(False)
+            self._sync_model_lock()
+
+    def _sync_model_lock(self) -> None:
+        # A worker waiting for the user's answer keeps the model selectors
+        # locked until that task finishes or is cancelled.
+        self.window.chat.set_model_locked(self.controller.awaiting_user_input)
 
     def _validate_input_attachments(self, paths: list[str]) -> list[Path]:
         validated: list[Path] = []
@@ -396,7 +631,7 @@ class ChatMixin:
                 "rename": self.rename_user,
                 "face": self.manage_face,
                 "password": self.change_password,
-                "settings": self.window.show_settings,
+                "settings": self.open_settings,
                 "logout": self.logout,
             },
         )
@@ -462,6 +697,7 @@ class ChatMixin:
             self.stt_in_progress = False
             self.operation_canceling = False
             self.window.chat.set_busy(False)
+            self._sync_model_lock()
             if (
                 self.resume_voice_listener_after_push
                 and self.state.voice_mode == "automatic"

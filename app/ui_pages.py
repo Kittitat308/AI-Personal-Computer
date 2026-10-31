@@ -8,6 +8,31 @@ from app.ui_dialogs import (
     OtpDialog,
 )
 
+
+AI_PROVIDER_LABELS = (("Qwen", "qwen"), ("Gemini", "gemini"), ("Claude", "claude"))
+GEMINI_MODELS = (
+    ("gemini-3.5-flash-lite", "gemini-3.5-flash-lite"),
+    ("gemini-3.8-flash", "gemini-3.8-flash"),
+)
+CLAUDE_MODELS = (
+    ("Opus 5.5", "opus"),
+    ("Sonnet 5.5", "sonnet"),
+    ("Fable 5.1", "fable"),
+    ("Haiku 5.5", "haiku"),
+)
+CLAUDE_EFFORTS = (
+    ("Low", "low"),
+    ("Medium", "medium"),
+    ("High", "high"),
+    ("Extra", "xhigh"),
+    ("Max", "max"),
+)
+
+
+def _label_for(choices, value: str) -> str:
+    return next((label for label, key in choices if key == value), value)
+
+
 class ChatPage(QWidget):
     message_submitted = Signal(str, object)
     folder_requested = Signal()
@@ -19,10 +44,16 @@ class ChatPage(QWidget):
     stop_requested = Signal()
     attachment_requested = Signal(str)
     permission_mode_changed = Signal(str)
+    ai_provider_changed = Signal(str)
+    model_effort_changed = Signal(str)
+    model_changed = Signal(str)
 
     def __init__(self):
         super().__init__()
         self._busy = False
+        self._model_locked = False
+        self._provider: str | None = None
+        self._ai_settings = None
         self._manual_recording = False
         self._voice_mode = "normal"
         self._permission_mode = "ask"
@@ -141,8 +172,6 @@ class ChatPage(QWidget):
         self.attachment_scroll.setWidget(self.attachment_container)
         folder_row = QHBoxLayout()
         folder_row.setSpacing(10)
-        input_row = QHBoxLayout()
-        input_row.setSpacing(10)
         self.folder_button = QPushButton("\u00a0\u00a0เลือกโฟลเดอร์")
         self.folder_button.setIcon(make_icon("folder", 24))
         self.folder_button.setIconSize(QSize(24, 24))
@@ -153,6 +182,13 @@ class ChatPage(QWidget):
         self.permission_mode_button.clicked.connect(
             self._show_permission_mode_menu
         )
+        self.ai_provider_button = PillMenuButton("เลือก AI")
+        self.ai_provider_button.setToolTip("เลือก AI ที่ใช้กับ Chat และ Worker")
+        self.ai_provider_button.clicked.connect(self._show_provider_menu)
+        self.model_button = PillMenuButton("เลือกโมเดล")
+        self.model_button.setToolTip("เลือกโมเดลและ Effort")
+        self.model_button.clicked.connect(self._show_model_menu)
+        self.model_button.setEnabled(False)
         self.remove_folder_button = QPushButton()
         self.remove_folder_button.setObjectName("removeFolder")
         self.remove_folder_button.setFixedSize(42, 42)
@@ -185,12 +221,22 @@ class ChatPage(QWidget):
         folder_row.addWidget(self.remove_folder_button)
         folder_row.addWidget(self.permission_mode_button)
         folder_row.addStretch()
-        input_row.addWidget(self.input, 1)
-        input_row.addWidget(self.mic_button)
-        input_row.addWidget(self.send_button)
+        model_row = QHBoxLayout()
+        model_row.setSpacing(8)
+        model_row.addWidget(self.ai_provider_button)
+        model_row.addWidget(self.model_button)
+        model_row.addStretch()
+        input_grid = QGridLayout()
+        input_grid.setHorizontalSpacing(10)
+        input_grid.setVerticalSpacing(8)
+        input_grid.setColumnStretch(0, 1)
+        input_grid.addWidget(self.input, 0, 0)
+        input_grid.addWidget(self.mic_button, 0, 1)
+        input_grid.addWidget(self.send_button, 0, 2)
+        input_grid.addLayout(model_row, 1, 0)
         composer_layout.addWidget(self.attachment_scroll)
         composer_layout.addLayout(folder_row)
-        composer_layout.addLayout(input_row)
+        composer_layout.addLayout(input_grid)
         self.activity_status = QLabel("")
         self.activity_status.setAlignment(Qt.AlignRight)
         self.activity_status.setObjectName("activityStatus")
@@ -499,6 +545,7 @@ class ChatPage(QWidget):
         self._busy = busy
         self.input.setEnabled(not busy)
         self.permission_mode_button.setEnabled(not busy)
+        self._apply_model_controls()
         self.mic_button.setEnabled(
             not busy
             and self._voice_mode == "normal"
@@ -576,9 +623,121 @@ class ChatPage(QWidget):
         if emit and changed:
             self.permission_mode_changed.emit(mode)
 
-    def clear_messages(self) -> None:
-        self.input.clear()
-        self.clear_input_attachments()
+    @staticmethod
+    def _choice_icon(selected: bool) -> QIcon:
+        if selected:
+            return make_menu_icon("check", "#43e78f")
+        blank = QPixmap(22, 22)
+        blank.fill(Qt.transparent)
+        return QIcon(blank)
+
+    @staticmethod
+    def _popup_above(button: QWidget, menu: QMenu) -> None:
+        menu.ensurePolished()
+        position = button.mapToGlobal(button.rect().topLeft())
+        position.setY(position.y() - menu.sizeHint().height() - 6)
+        menu.exec(position)
+
+    def _show_provider_menu(self) -> None:
+        menu = QMenu(self)
+        for label, provider in AI_PROVIDER_LABELS:
+            action = menu.addAction(label)
+            action.setIcon(self._choice_icon(provider == self._provider))
+            action.triggered.connect(
+                lambda _checked=False, selected=provider: self._choose_provider(
+                    selected
+                )
+            )
+        self._popup_above(self.ai_provider_button, menu)
+
+    def _choose_provider(self, provider: str) -> None:
+        if provider != self._provider:
+            self.ai_provider_changed.emit(provider)
+
+    def _show_model_menu(self) -> None:
+        settings = self._ai_settings
+        if settings is None or self._provider not in ("gemini", "claude"):
+            return
+        if self._provider == "claude":
+            choices, current = CLAUDE_MODELS, settings.claude_model
+        else:
+            choices, current = GEMINI_MODELS, settings.gemini_model
+        menu = QMenu(self)
+        for label, value in choices:
+            action = menu.addAction(label)
+            action.setIcon(self._choice_icon(value == current))
+            action.triggered.connect(
+                lambda _checked=False, selected=value, now=current: (
+                    self.model_changed.emit(selected) if selected != now else None
+                )
+            )
+        if self._provider == "claude":
+            menu.addSeparator()
+            effort = _label_for(CLAUDE_EFFORTS, settings.model_effort)
+            effort_menu = menu.addMenu(f"Effort · {effort}")
+            effort_menu.setIcon(self._choice_icon(False))
+            for label, value in CLAUDE_EFFORTS:
+                action = effort_menu.addAction(label)
+                action.setIcon(self._choice_icon(value == settings.model_effort))
+                action.triggered.connect(
+                    lambda _checked=False, selected=value, now=settings.model_effort: (
+                        self.model_effort_changed.emit(selected)
+                        if selected != now
+                        else None
+                    )
+                )
+        self._popup_above(self.model_button, menu)
+
+    def set_model_locked(self, locked: bool) -> None:
+        self._model_locked = locked
+        self._apply_model_controls()
+
+    def _apply_model_controls(self) -> None:
+        changeable = not self._busy and not self._model_locked
+        self.ai_provider_button.setEnabled(changeable)
+        self.model_button.setEnabled(
+            changeable and self._provider in ("gemini", "claude")
+        )
+
+    def _refresh_model_buttons(self) -> None:
+        provider = self._provider
+        settings = self._ai_settings
+        self.ai_provider_button.set_label(
+            _label_for(AI_PROVIDER_LABELS, provider) if provider else "เลือก AI"
+        )
+        if provider is None or settings is None:
+            label = "เลือกโมเดล"
+        elif provider == "qwen":
+            label = settings.qwen_model
+        elif provider == "gemini":
+            label = settings.gemini_model
+        else:
+            label = (
+                f"{_label_for(CLAUDE_MODELS, settings.claude_model)}"
+                f" · {_label_for(CLAUDE_EFFORTS, settings.model_effort)}"
+            )
+        self.model_button.set_label(label)
+        self._apply_model_controls()
+
+    def set_ai_unselected(self) -> None:
+        # Shown when the saved model could not be loaded: nothing is selected
+        # until the user picks one.
+        self._provider = None
+        self._refresh_model_buttons()
+
+    def set_ai_provider(self, provider: str) -> None:
+        self._provider = provider
+        self._refresh_model_buttons()
+
+    def set_ai_models(self, settings, selected_provider: str) -> None:
+        self._ai_settings = settings
+        self._provider = selected_provider
+        self._refresh_model_buttons()
+
+    def clear_messages(self, keep_input: bool = False) -> None:
+        if not keep_input:
+            self.input.clear()
+            self.clear_input_attachments()
         while self.messages_layout.count() > 1:
             item = self.messages_layout.takeAt(0)
             child_layout = item.layout()
@@ -605,6 +764,7 @@ class ChatPage(QWidget):
 
 class SettingsPage(QWidget):
     back_requested = Signal()
+    saved = Signal(dict)
 
     def __init__(self):
         super().__init__()
@@ -621,7 +781,33 @@ class SettingsPage(QWidget):
         top_layout.addWidget(title)
         top_layout.addStretch()
         outer.addWidget(top)
+        form = QFrame()
+        form.setObjectName("card")
+        form_layout = QVBoxLayout(form)
+        form_layout.setContentsMargins(28, 24, 28, 24)
+        form_layout.setSpacing(10)
+
+        self.gemini_api_key = QLineEdit()
+        self.gemini_api_key.setEchoMode(QLineEdit.Password)
+        form_layout.addWidget(QLabel("Gemini API key"))
+        form_layout.addWidget(self.gemini_api_key)
+        save = QPushButton("บันทึก")
+        save.setObjectName("primary")
+        save.clicked.connect(self._save)
+        form_layout.addSpacing(8)
+        form_layout.addWidget(save, alignment=Qt.AlignRight)
+        outer.addWidget(form)
         outer.addStretch()
+
+    def load_values(self, values: dict) -> None:
+        self.gemini_api_key.setText(values.get("gemini_api_key", ""))
+
+    def _save(self) -> None:
+        self.saved.emit(
+            {
+                "gemini_api_key": self.gemini_api_key.text().strip(),
+            }
+        )
 
 
 class MainWindow(QMainWindow):

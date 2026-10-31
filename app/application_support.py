@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import QFileDialog
 
 from app.database import Database
+from app.ai_secrets import migrate_legacy_api_keys
 from app.face import FaceService
 from app.gui_controller import GUIController
 from app.hardware import HardwareManager
@@ -46,6 +47,7 @@ __all__ = [
     "Signal",
     "QFileDialog",
     "Database",
+    "migrate_legacy_api_keys",
     "FaceService",
     "GUIController",
     "HardwareManager",

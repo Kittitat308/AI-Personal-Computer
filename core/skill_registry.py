@@ -2,8 +2,13 @@ import asyncio
 import os
 import socket
 import sys
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, AsyncIterator
+
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 
 from core.config import PROJECT_ROOT, SKILLS_DIR
 
@@ -17,7 +22,6 @@ class SkillDefinition:
     builtin_tool_names: tuple[str, ...] = ()
     runtime_dependencies: tuple[str, ...] = ()
     worker_dependencies: tuple[str, ...] = ()
-    slash_command: str | None = None
     working_directory: Path | None = None
 
     @property
@@ -26,6 +30,24 @@ class SkillDefinition:
             return ""
 
         return (self.directory / "SKILL.md").read_text(encoding="utf-8").strip()
+
+
+@dataclass(frozen=True)
+class ToolDefinition:
+    skill_id: str
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+
+    def as_openai_tool(self) -> dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_schema,
+            },
+        }
 
 
 class SkillRuntime:
@@ -144,7 +166,7 @@ class SkillRuntime:
 
 
 class SkillRegistry:
-    def __init__(self):
+    def __init__(self, provider_name: str = "claude"):
         browser = SkillDefinition(
             skill_id="browser",
             description=(
@@ -179,17 +201,6 @@ class SkillRegistry:
             directory=SKILLS_DIR / "calendar",
             tool_names=("read_events", "create_event"),
         )
-        web_research = SkillDefinition(
-            skill_id="web_research",
-            description=(
-                "ค้นหาและอ่านข้อมูลสาธารณะจากเว็บเพื่อให้คำตอบที่เป็นปัจจุบัน "
-                "ตรวจสอบย้อนกลับได้ และมีแหล่งอ้างอิง เช่น ข่าว งานวิจัย "
-                "ข้อมูลผลิตภัณฑ์ การเปรียบเทียบ และเนื้อหาจาก URL สาธารณะ"
-            ),
-            directory=SKILLS_DIR / "web_research",
-            tool_names=(),
-            builtin_tool_names=("WebSearch", "WebFetch"),
-        )
         youtube = SkillDefinition(
             skill_id="youtube",
             description=(
@@ -201,54 +212,6 @@ class SkillRegistry:
             tool_names=("search_youtube", "open_video"),
             runtime_dependencies=("browser",),
             worker_dependencies=("browser",),
-        )
-        docx = SkillDefinition(
-            skill_id="docx",
-            description=(
-                "สร้าง อ่าน แก้ไข และจัดรูปแบบเอกสาร Microsoft Word นามสกุล .docx "
-                "เช่น รายงาน จดหมาย บันทึก ตาราง และเอกสารที่มีรูปภาพ"
-            ),
-            directory=None,
-            tool_names=(),
-            builtin_tool_names=("Read", "Write", "Edit", "Bash", "Glob", "Grep"),
-            slash_command="docx",
-            working_directory=PROJECT_ROOT / "documents",
-        )
-        xlsx = SkillDefinition(
-            skill_id="xlsx",
-            description=(
-                "สร้าง อ่าน แก้ไข วิเคราะห์ และจัดรูปแบบไฟล์ตารางคำนวณ Microsoft "
-                "Excel นามสกุล .xlsx เช่น สูตร ตาราง กราฟ และการสรุปข้อมูล"
-            ),
-            directory=None,
-            tool_names=(),
-            builtin_tool_names=("Read", "Write", "Edit", "Bash", "Glob", "Grep"),
-            slash_command="xlsx",
-            working_directory=PROJECT_ROOT / "documents",
-        )
-        pptx = SkillDefinition(
-            skill_id="pptx",
-            description=(
-                "สร้าง อ่าน แก้ไข และจัดรูปแบบงานนำเสนอ Microsoft PowerPoint "
-                "นามสกุล .pptx เช่น สไลด์ ข้อความ ตาราง กราฟ และรูปภาพ"
-            ),
-            directory=None,
-            tool_names=(),
-            builtin_tool_names=("Read", "Write", "Edit", "Bash", "Glob", "Grep"),
-            slash_command="pptx",
-            working_directory=PROJECT_ROOT / "documents",
-        )
-        pdf = SkillDefinition(
-            skill_id="pdf",
-            description=(
-                "สร้าง อ่าน ตรวจสอบ แก้ไข และแปลงไฟล์ PDF รวมถึงดึงข้อความ "
-                "รวม แยก หรือจัดการหน้าเอกสาร PDF"
-            ),
-            directory=None,
-            tool_names=(),
-            builtin_tool_names=("Read", "Write", "Edit", "Bash", "Glob", "Grep"),
-            slash_command="pdf",
-            working_directory=PROJECT_ROOT / "documents",
         )
         admin = SkillDefinition(
             skill_id="admin",
@@ -263,21 +226,18 @@ class SkillRegistry:
             directory=None,
             tool_names=(),
         )
-        self.definitions = {
+        self.central_definitions = {
             browser.skill_id: browser,
             gmail.skill_id: gmail,
             calendar.skill_id: calendar,
-            web_research.skill_id: web_research,
             youtube.skill_id: youtube,
-            docx.skill_id: docx,
-            xlsx.skill_id: xlsx,
-            pptx.skill_id: pptx,
-            pdf.skill_id: pdf,
             admin.skill_id: admin,
         }
+        self.definitions: dict[str, SkillDefinition] = {}
+        self.set_provider(provider_name)
         self.runtimes = {
             skill_id: SkillRuntime(definition)
-            for skill_id, definition in self.definitions.items()
+            for skill_id, definition in self.central_definitions.items()
             if definition.tool_names
         }
         browser_bridge_port = self.runtimes["browser"]._find_free_port()
@@ -287,6 +247,20 @@ class SkillRegistry:
         }
         self.runtimes["browser"].environment_overrides.update(bridge_environment)
         self.runtimes["youtube"].environment_overrides.update(bridge_environment)
+
+    def set_provider(self, provider_name: str) -> None:
+        definitions = {
+            skill_id: definition
+            for skill_id, definition in self.central_definitions.items()
+            if skill_id != "admin"
+        }
+        if provider_name.strip().casefold() == "claude":
+            from claude_skills import claude_skill_definitions
+
+            for definition in claude_skill_definitions():
+                definitions[definition.skill_id] = definition
+        definitions["admin"] = self.central_definitions["admin"]
+        self.definitions = definitions
 
     async def set_active_user(self, user_id: int | None) -> None:
         users_directory = PROJECT_ROOT / "data" / "users"
@@ -359,6 +333,45 @@ class SkillRegistry:
             for definition in definitions
             if definition.skill_id in self.runtimes
         }
+
+    @asynccontextmanager
+    async def _session(self, skill_id: str) -> AsyncIterator[ClientSession]:
+        runtime = self.runtimes[skill_id]
+        await runtime.start()
+        async with streamable_http_client(runtime.mcp_config["url"]) as transport:
+            async with ClientSession(transport[0], transport[1]) as session:
+                await session.initialize()
+                yield session
+
+    async def list_tools(
+        self,
+        definitions: list[SkillDefinition],
+    ) -> list[ToolDefinition]:
+        tools: list[ToolDefinition] = []
+        for definition in definitions:
+            if definition.skill_id not in self.runtimes:
+                continue
+            async with self._session(definition.skill_id) as session:
+                result = await session.list_tools()
+                tools.extend(
+                    ToolDefinition(
+                        skill_id=definition.skill_id,
+                        name=tool.name,
+                        description=tool.description or "",
+                        input_schema=tool.input_schema,
+                    )
+                    for tool in result.tools
+                )
+        return tools
+
+    async def call_tool(
+        self,
+        tool: ToolDefinition,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        async with self._session(tool.skill_id) as session:
+            result = await session.call_tool(tool.name, arguments)
+            return result.model_dump(mode="json", exclude_none=True)
 
     async def close(self) -> None:
         for runtime in reversed(list(self.runtimes.values())):

@@ -33,6 +33,7 @@ class DesktopApplication(
         self.project_root = project_root
         self.state = RuntimeState()
         self.database = Database(project_root / "data" / "ai_personal_computer.db")
+        migrate_legacy_api_keys(self.database, project_root)
         self.attachment_cache = tempfile.TemporaryDirectory(prefix="ai_pc_attachments_")
         self.attachment_cache_path = Path(self.attachment_cache.name).resolve()
         self.input_attachment_cache: tempfile.TemporaryDirectory | None = None
@@ -86,6 +87,7 @@ class DesktopApplication(
         self.shutdown_started = False
         self.closed = False
         self.startup_errors: list[str] = []
+        self.ai_model_unselected = False
 
         self.preview_timer = QTimer()
         self.preview_timer.setInterval(80)
@@ -117,6 +119,9 @@ class DesktopApplication(
         self.window.chat.permission_mode_changed.connect(
             self.controller.set_admin_permission_mode
         )
+        self.window.chat.ai_provider_changed.connect(self._on_ai_provider_changed)
+        self.window.chat.model_effort_changed.connect(self._on_model_effort_changed)
+        self.window.chat.model_changed.connect(self._on_model_changed)
         self.window.chat.profile_requested.connect(self.open_profile_menu)
         self.window.chat.toggle_requested.connect(self._on_toggle_requested)
         self.window.chat.voice_mode_changed.connect(self._on_voice_mode_changed)
@@ -124,3 +129,4 @@ class DesktopApplication(
         self.window.chat.stop_requested.connect(self.stop_current_operation)
         self.window.chat.attachment_requested.connect(self.save_attachment)
         self.window.settings.back_requested.connect(self._return_to_chat)
+        self.window.settings.saved.connect(self._save_ai_settings)

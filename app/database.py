@@ -25,6 +25,16 @@ class DeviceSettings:
     tts_enabled: bool
 
 
+@dataclass(frozen=True)
+class AISettings:
+    user_id: int
+    provider: str
+    qwen_model: str
+    gemini_model: str
+    claude_model: str
+    model_effort: str
+
+
 USERNAME_PATTERN = re.compile(r"^[a-z][a-z0-9]{0,31}$")
 USERNAME_START_PATTERN = re.compile(r"^[a-z]")
 NICKNAME_PATTERN = re.compile(
@@ -34,6 +44,9 @@ NICKNAME_PATTERN = re.compile(
 )
 PASSWORD_PATTERN = re.compile(r"^(?=.*[A-Za-z])(?=.*[0-9])[A-Za-z0-9]{8,}$")
 GMAIL_PATTERN = re.compile(r"^[A-Za-z0-9._%+-]+@gmail\.com$", re.IGNORECASE)
+API_KEY_COLUMNS = {
+    "gemini": "gemini_api_key",
+}
 DEVICE_SETTING_COLUMNS = {
     "microphone": "microphone_enabled",
     "camera": "camera_enabled",
@@ -119,6 +132,14 @@ class Database:
                 "UPDATE users SET nickname = username WHERE TRIM(nickname) = ''"
             )
             self._enforce_linux_username_rules(connection)
+            key_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(ai_api_keys)").fetchall()
+            }
+            # Earlier layout: one row per (user, provider) with a generic api_key.
+            legacy_keys = "provider" in key_columns
+            if legacy_keys:
+                connection.execute("ALTER TABLE ai_api_keys RENAME TO ai_api_keys_old")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS device_settings (
@@ -132,8 +153,39 @@ class Database:
 
                 INSERT OR IGNORE INTO device_settings(user_id)
                 SELECT id FROM users;
+
+                CREATE TABLE IF NOT EXISTS ai_settings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL UNIQUE,
+                    provider TEXT NOT NULL DEFAULT 'claude'
+                        CHECK (provider IN ('qwen', 'gemini', 'claude')),
+                    qwen_model TEXT NOT NULL DEFAULT 'Qwen3.5-2B-Q4_K_M.gguf',
+                    gemini_model TEXT NOT NULL DEFAULT 'gemini-3.5-flash-lite',
+                    claude_model TEXT NOT NULL DEFAULT 'haiku',
+                    model_effort TEXT NOT NULL DEFAULT 'medium'
+                        CHECK (model_effort IN ('low', 'medium', 'high', 'xhigh', 'max')),
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+
+                INSERT OR IGNORE INTO ai_settings(user_id)
+                SELECT id FROM users;
+
+                CREATE TABLE IF NOT EXISTS ai_api_keys (
+                    user_id INTEGER PRIMARY KEY,
+                    gemini_api_key TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
                 """
             )
+            if legacy_keys:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO ai_api_keys(user_id, gemini_api_key)
+                    SELECT user_id, api_key FROM ai_api_keys_old
+                    WHERE provider = 'gemini'
+                    """
+                )
+                connection.execute("DROP TABLE ai_api_keys_old")
 
     @staticmethod
     def _enforce_linux_username_rules(connection: sqlite3.Connection) -> None:
@@ -248,6 +300,10 @@ class Database:
                 "INSERT INTO device_settings(user_id) VALUES (?)",
                 (user_id,),
             )
+            connection.execute(
+                "INSERT INTO ai_settings(user_id) VALUES (?)",
+                (user_id,),
+            )
             self._replace_embeddings(connection, user_id, embeddings or [])
             return User(user_id, username, nickname)
 
@@ -286,6 +342,93 @@ class Database:
             connection.execute(
                 f"UPDATE device_settings SET {column} = ? WHERE user_id = ?",
                 (int(enabled), user_id),
+            )
+
+    def get_ai_settings(self, user_id: int) -> AISettings:
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO ai_settings(user_id) VALUES (?)",
+                (user_id,),
+            )
+            row = connection.execute(
+                """
+                SELECT user_id, provider, qwen_model, gemini_model,
+                       claude_model, model_effort
+                FROM ai_settings
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("ไม่พบการตั้งค่า AI ของผู้ใช้")
+        return AISettings(
+            user_id=int(row["user_id"]),
+            provider=str(row["provider"]),
+            qwen_model=str(row["qwen_model"]),
+            gemini_model=str(row["gemini_model"]),
+            claude_model=str(row["claude_model"]),
+            model_effort=str(row["model_effort"]),
+        )
+
+    def update_ai_settings(
+        self,
+        user_id: int,
+        *,
+        provider: str,
+        qwen_model: str,
+        gemini_model: str,
+        claude_model: str,
+        model_effort: str,
+    ) -> None:
+        provider = provider.strip().casefold()
+        model_effort = model_effort.strip().casefold()
+        if provider not in {"qwen", "gemini", "claude"}:
+            raise ValueError("AI provider ไม่ถูกต้อง")
+        if model_effort not in {"low", "medium", "high", "xhigh", "max"}:
+            raise ValueError("Model effort ไม่ถูกต้อง")
+        models = [qwen_model.strip(), gemini_model.strip(), claude_model.strip()]
+        if not all(models):
+            raise ValueError("ชื่อโมเดลต้องไม่ว่าง")
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO ai_settings(user_id) VALUES (?)",
+                (user_id,),
+            )
+            connection.execute(
+                """
+                UPDATE ai_settings
+                SET provider = ?, qwen_model = ?, gemini_model = ?,
+                    claude_model = ?, model_effort = ?
+                WHERE user_id = ?
+                """,
+                (provider, *models, model_effort, user_id),
+            )
+
+    @staticmethod
+    def _api_key_column(provider: str) -> str:
+        column = API_KEY_COLUMNS.get(provider.strip().casefold())
+        if column is None:
+            raise ValueError("AI provider นี้ไม่ใช้ API key")
+        return column
+
+    def get_api_key(self, user_id: int, provider: str) -> str:
+        column = self._api_key_column(provider)
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                f"SELECT {column} FROM ai_api_keys WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        return "" if row is None else str(row[column])
+
+    def set_api_key(self, user_id: int, provider: str, api_key: str) -> None:
+        column = self._api_key_column(provider)
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                f"""
+                INSERT INTO ai_api_keys(user_id, {column}) VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET {column} = excluded.{column}
+                """,
+                (user_id, api_key.strip()),
             )
 
     def authenticate(self, username: str, password: str) -> User | None:

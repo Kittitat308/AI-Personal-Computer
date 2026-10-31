@@ -1,25 +1,15 @@
-import os
 from pathlib import Path
 
 
 STT_DIR = Path(__file__).resolve().parent
-WHISPER_DIR = STT_DIR / "whisper"
-MODEL_PATH = WHISPER_DIR / "ggml-thonburian-distilled-small-q8_0.bin"
-WARMUP_AUDIO_PATH = STT_DIR / "warmup.wav"
+MODEL_DIR = STT_DIR / "zipformer"
 
-WHISPER_EXECUTABLE = WHISPER_DIR / (
-    "whisper-server.exe" if os.name == "nt" else "whisper-server"
-)
-
-HOST = "127.0.0.1"
-PORT = 8081
-THREADS = 4
-LANGUAGE = "th"
-SERVER_START_TIMEOUT_SECONDS = 60.0
-INFERENCE_TIMEOUT_SECONDS = 10.0
-WARMUP_TIMEOUT_SECONDS = 30.0
-CANCEL_REQUEST_TIMEOUT_SECONDS = 1.0
-CANCEL_WAIT_TIMEOUT_SECONDS = 3.0
+ENCODER_PATH = MODEL_DIR / "encoder-epoch-12-avg-5.int8.onnx"
+DECODER_PATH = MODEL_DIR / "decoder-epoch-12-avg-5.onnx"
+JOINER_PATH = MODEL_DIR / "joiner-epoch-12-avg-5.int8.onnx"
+TOKENS_PATH = MODEL_DIR / "tokens.txt"
 
 SAMPLE_RATE = 16_000
+FEATURE_DIM = 80
+NUM_THREADS = 2
 CHANNELS = 1

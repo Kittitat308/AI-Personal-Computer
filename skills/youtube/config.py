@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 
 SKILL_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SKILL_DIR.parents[2]
+PROJECT_ROOT = SKILL_DIR.parents[1]
 load_dotenv(PROJECT_ROOT / ".env")
 
 MCP_HOST = "127.0.0.1"

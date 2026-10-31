@@ -15,7 +15,7 @@ SEND_SCOPE = ["https://www.googleapis.com/auth/gmail.send"]
 
 class RecoveryEmailSender:
     def __init__(self, project_root: Path):
-        self.credentials_path = project_root / "google_credentials.json"
+        self.credentials_path = project_root / "secrets" / "google_credentials.json"
         self.token_path = project_root / "secrets" / "gmail_recovery_token.json"
         self.token_path.parent.mkdir(parents=True, exist_ok=True)
         self._service = None

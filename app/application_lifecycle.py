@@ -316,13 +316,17 @@ class LifecycleMixin:
 
     async def _presence_check(self, frame) -> None:
         try:
-            result = await asyncio.to_thread(self.face.extract_largest, frame)
-            if not result.detected:
+            if frame is None:
                 return
-            user = await asyncio.to_thread(self.face.recognize, result.embedding)
+            result = await asyncio.to_thread(self.face.extract_largest, frame)
+            user = None
+            if result.detected:
+                user = await asyncio.to_thread(self.face.recognize, result.embedding)
             if user is not None and user.id == self.state.current_user_id:
                 self.presence_missing_count = 0
                 return
+            # No face, or a face that is not the signed-in user, both mean the
+            # current user was not found in this check.
             self.presence_missing_count += 1
             if self.presence_missing_count >= 3:
                 self.logout()

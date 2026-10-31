@@ -32,7 +32,9 @@ class CalendarService:
 
     def __init__(self, project_root, token_path):
 
-        self.credentials_path = Path(project_root) / "google_credentials.json"
+        self.credentials_path = (
+            Path(project_root) / "secrets" / "google_credentials.json"
+        )
         self.token_path = Path(token_path) if token_path else None
         self.service = None
         self.service_lock = threading.Lock()
