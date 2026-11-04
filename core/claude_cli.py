@@ -12,13 +12,20 @@ from typing import Any
 
 
 # Turns off everything a structured, tool-limited CLI session must not load.
-ISOLATED_ARGUMENTS = (
+ISOLATED_SETTINGS = (
     "--disable-slash-commands",
     "--setting-sources",
     "",
     "--strict-mcp-config",
-    "--permission-mode",
-    "dontAsk",
+)
+# Isolated and never prompts: anything not explicitly allowed is denied.
+ISOLATED_ARGUMENTS = (*ISOLATED_SETTINGS, "--permission-mode", "dontAsk")
+# Lets the CLI ask the host (this program) before a tool needs permission.
+HOST_PERMISSION_PROMPTS = (
+    "--permission-prompts",
+    "host",
+    "--permission-prompt-tool",
+    "stdio",
 )
 
 
@@ -313,3 +320,90 @@ class ClaudeSession:
 
         with contextlib.suppress(ProcessLookupError):
             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+
+
+def permission_question(event: dict) -> str:
+    """Spoken question asking the user to allow one CLI permission request."""
+    request = event.get("request", {})
+    description = str(request.get("description") or "").strip()
+    if description:
+        description = description.rstrip(".。 ")
+        return f"{description} ยืนยันให้ดำเนินการไหมครับ"
+
+    tool_name = request.get("tool_name", "คำสั่งระบบ")
+    return f"ต้องใช้ {tool_name} เพื่อทำงานต่อ ยืนยันไหมครับ"
+
+
+class InteractiveSession:
+    """A CLI session whose turns can pause to ask the user for tool permission.
+
+    ``wait`` returns the turn's response, or ``None`` when the CLI is waiting
+    for a permission decision; answer it with ``answer_permission`` and wait
+    again.
+    """
+
+    def __init__(self, session: ClaudeSession, on_assistant_text=None):
+        self.session = session
+        self.on_assistant_text = on_assistant_text
+        self.turn_task: asyncio.Task | None = None
+        self.permissions: asyncio.Queue = asyncio.Queue()
+        self.pending_permission: dict | None = None
+
+    @property
+    def question(self) -> str:
+        if self.pending_permission is None:
+            raise RuntimeError("No permission request is waiting")
+        return permission_question(self.pending_permission)
+
+    def start_turn(self, message) -> None:
+        if self.turn_task is not None:
+            raise RuntimeError("A CLI turn is already running")
+        self.turn_task = asyncio.create_task(
+            self.session.generate(
+                message,
+                on_assistant_text=self.on_assistant_text,
+                on_permission_request=self.permissions.put_nowait,
+            )
+        )
+
+    async def wait(self) -> ClaudeResponse | None:
+        if self.turn_task is None:
+            raise RuntimeError("No CLI turn is running")
+        waiter = asyncio.create_task(self.permissions.get())
+        try:
+            done, _ = await asyncio.wait(
+                {self.turn_task, waiter},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if self.turn_task in done:
+                turn_task, self.turn_task = self.turn_task, None
+                return turn_task.result()
+            self.pending_permission = waiter.result()
+            return None
+        finally:
+            if not waiter.done():
+                waiter.cancel()
+
+    async def answer_permission(self, allow: bool) -> None:
+        permission = self.pending_permission
+        if permission is None:
+            raise RuntimeError("No permission request is waiting")
+        self.pending_permission = None
+        await self.session.respond_to_permission(
+            permission["request_id"],
+            permission["request"].get("input", {}),
+            allow,
+        )
+
+    async def close(self) -> None:
+        await self.session.close()
+
+    async def abort(self) -> None:
+        turn_task, self.turn_task = self.turn_task, None
+        self.pending_permission = None
+        if turn_task is not None and not turn_task.done():
+            turn_task.cancel()
+        await self.session.abort()
+        if turn_task is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await turn_task

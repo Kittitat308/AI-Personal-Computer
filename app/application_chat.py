@@ -272,6 +272,8 @@ class ChatMixin:
             self.ai_model_unselected = False
             self.window.chat.set_ai_models(updated, provider)
             self.window.chat.clear_messages(keep_input=True)
+            if not provider_info(provider).claude_skills:
+                self.clear_folder()
         except Exception as error:
             if self.ai_model_unselected:
                 self.window.chat.set_ai_unselected()
@@ -381,7 +383,6 @@ class ChatMixin:
                 )
             effective_text = text.strip() or "โปรดตรวจสอบไฟล์ที่แนบมา"
             if self.controller.awaiting_user_input:
-                documents_before = self._document_snapshot()
                 worker = await self.controller.continue_task(
                     self._message_with_attachment_paths(
                         effective_text,
@@ -390,7 +391,7 @@ class ChatMixin:
                     progress_callback=self._show_admin_progress,
                 )
                 self.window.chat.add_message(worker.response, "result")
-                self._show_created_documents(documents_before, worker.status)
+                self._show_task_outputs(worker.status)
                 self._speak(worker.response)
             else:
                 chat = await self.controller.generate_chat(
@@ -399,7 +400,6 @@ class ChatMixin:
                 )
                 self.window.chat.add_message(chat.response, "assistant")
                 self._speak(chat.response)
-                documents_before = self._document_snapshot()
                 self.controller.set_temporary_attachment_directory(
                     Path(self.input_attachment_cache.name)
                     if (
@@ -414,7 +414,7 @@ class ChatMixin:
                 )
                 if worker is not None:
                     self.window.chat.add_message(worker.response, "result")
-                    self._show_created_documents(documents_before, worker.status)
+                    self._show_task_outputs(worker.status)
                     self._speak(worker.response)
             await self.controller.rotate_chat_if_ready()
             if self.state.tts_enabled:
@@ -480,71 +480,17 @@ class ChatMixin:
         self.window.chat.add_message(message, "result")
         self._speak(message)
 
-    def _document_snapshot(self) -> dict[Path, tuple[int, int]]:
-        documents = (self.project_root / "documents").resolve()
-        snapshot: dict[Path, tuple[int, int]] = {}
-        candidates = list(documents.rglob("*")) if documents.is_dir() else []
-        candidates.extend(self.project_root.glob("*"))
-        for path in candidates:
-            try:
-                if (
-                    not path.is_file()
-                    or path.is_symlink()
-                    or path.suffix.lower() not in self.ATTACHMENT_SUFFIXES
-                ):
-                    continue
-                stat = path.stat()
-            except OSError:
-                continue
-            snapshot[path.resolve()] = (stat.st_mtime_ns, stat.st_size)
-        return snapshot
-
-    def _show_created_documents(
-        self,
-        before: dict[Path, tuple[int, int]],
-        worker_status: str,
-    ) -> None:
-        if worker_status != "completed":
+    def _show_task_outputs(self, worker_status: str) -> None:
+        """Attach the files a finished task made in its temporary folder."""
+        if self.controller.awaiting_user_input:
             return
-        after = self._document_snapshot()
-        changed = sorted(
-            (path for path, signature in after.items() if before.get(path) != signature),
-            key=lambda path: path.name.casefold(),
-        )
-        staged: list[Path] = []
-        for path in changed:
-            source = self._move_root_attachment(path)
-            destination = self._unique_attachment_cache_path(source.name)
-            shutil.copy2(source, destination)
-            staged.append(destination)
-        for path in staged:
+        files = self.controller.collect_task_outputs(self.attachment_cache_path)
+        if worker_status != "completed":
+            for path in files:
+                path.unlink(missing_ok=True)
+            return
+        for path in files:
             self.window.chat.add_attachment(path)
-        if staged:
-            self._clear_documents()
-
-    def _unique_attachment_cache_path(self, filename: str) -> Path:
-        original = self.attachment_cache_path / filename
-        destination = original
-        counter = 2
-        while destination.exists():
-            destination = (
-                self.attachment_cache_path
-                / f"{original.stem}_{counter}{original.suffix}"
-            )
-            counter += 1
-        return destination
-
-    def _clear_documents(self) -> None:
-        documents = (self.project_root / "documents").resolve()
-        expected = self.project_root.resolve() / "documents"
-        if documents != expected:
-            raise RuntimeError("ตำแหน่งโฟลเดอร์ documents ไม่ถูกต้อง")
-        documents.mkdir(parents=True, exist_ok=True)
-        for child in documents.iterdir():
-            if child.is_symlink() or child.is_file():
-                child.unlink()
-            elif child.is_dir():
-                shutil.rmtree(child)
 
     def _reset_attachment_cache(self) -> None:
         self.attachment_cache.cleanup()
@@ -553,28 +499,9 @@ class ChatMixin:
         )
         self.attachment_cache_path = Path(self.attachment_cache.name).resolve()
 
-    def _move_root_attachment(self, path: Path) -> Path:
-        project_root = self.project_root.resolve()
-        source = path.resolve()
-        if source.parent != project_root:
-            return source
-
-        documents = (project_root / "documents").resolve()
-        documents.mkdir(parents=True, exist_ok=True)
-        destination = documents / source.name
-        counter = 2
-        while destination.exists():
-            destination = documents / f"{source.stem}_{counter}{source.suffix}"
-            counter += 1
-        return Path(shutil.move(str(source), str(destination))).resolve()
-
     def save_attachment(self, source_path: str) -> None:
         source = Path(source_path).resolve()
-        project_root = self.project_root.resolve()
-        documents = (self.project_root / "documents").resolve()
-        in_project = source.parent == project_root or documents in source.parents
-        in_cache = source.parent == self.attachment_cache_path
-        if not in_project and not in_cache:
+        if source.parent != self.attachment_cache_path:
             self._show_error("ไม่สามารถบันทึกไฟล์จากตำแหน่งนี้ได้")
             return
         if (

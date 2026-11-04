@@ -7,6 +7,5 @@
     "Bash",
     "Glob",
     "Grep"
-  ],
-  "working_directory": "documents"
+  ]
 }

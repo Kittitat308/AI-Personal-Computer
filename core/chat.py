@@ -31,17 +31,27 @@ class ChatAI:
         self.turn_limit = turn_limit
         self.recent_turns_to_keep = recent_turns_to_keep
         self.skill_catalog = skill_catalog
+        # Folder the user allowed the worker to work in, if any.
+        self.selected_folder: str | None = None
         self.base_prompt = (PROMPTS_DIR / "chat.md").read_text(encoding="utf-8")
         self.turn_count = 0
         self.history: deque[ConversationTurn] = deque(maxlen=turn_limit)
 
     def _system_prompt(self) -> str:
-        return "\n\n".join(
-            [
-                self.base_prompt.strip(),
-                "## Available skills\n\n" + self.skill_catalog.strip(),
-            ]
-        )
+        sections = [
+            self.base_prompt.strip(),
+            "## Available skills\n\n" + self.skill_catalog.strip(),
+        ]
+        if self.selected_folder:
+            sections.append(
+                "## Selected folder\n\n"
+                f"The user selected this folder for the Worker: {self.selected_folder}\n"
+                "Requests about its files, such as reading, summarizing, "
+                "creating, editing, renaming, moving or deleting them, are tasks "
+                "for a skill that works with files. When the user says this "
+                "folder or the selected folder, it means this path."
+            )
+        return "\n\n".join(sections)
 
     def _messages(self, current_content) -> list[dict]:
         messages: list[dict] = [

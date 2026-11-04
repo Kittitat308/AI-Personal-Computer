@@ -21,7 +21,8 @@ class Controller:
         self.registry = SkillRegistry(provider_name)
         self.admin = AdminAI()
         self.confirmation = ConfirmationAI()
-        self.admin_permission_mode = "ask"
+        self.permission_mode = "ask"
+        self.allowed_directory: str | None = None
         self.lock = asyncio.Lock()
         self._install(create_provider(provider_name, model, effort, api_key))
 
@@ -31,6 +32,13 @@ class Controller:
         self.chat = ChatAI(provider, self.registry.catalog())
         self.worker = WorkerAI(provider, self.registry)
         self.pending_execution_result = None
+        self.set_allowed_directory(self.allowed_directory)
+
+    def set_allowed_directory(self, path: str | None) -> None:
+        """Folder the user lets the worker work in, or None for a temporary one."""
+        self.allowed_directory = path
+        self.worker.set_allowed_directory(path)
+        self.chat.selected_folder = path
 
     @property
     def provider_name(self) -> str:
@@ -93,10 +101,11 @@ class Controller:
             if not close_first:
                 await old_provider.close()
 
-    def set_admin_permission_mode(self, mode: str) -> None:
+    def set_permission_mode(self, mode: str) -> None:
+        """'ask' lets the user decide each permission request; 'auto' allows them."""
         if mode not in {"ask", "auto"}:
-            raise ValueError("Admin permission mode must be 'ask' or 'auto'")
-        self.admin_permission_mode = mode
+            raise ValueError("Permission mode must be 'ask' or 'auto'")
+        self.permission_mode = mode
 
     @property
     def awaiting_user_input(self) -> bool:
@@ -123,67 +132,63 @@ class Controller:
         if chat_result.type != "task":
             return None
         if "admin" in chat_result.task.skill_ids:
+            role = self.admin
             result = await self.admin.execute(
                 chat_result.task, progress_callback=progress_callback
             )
-            result = await self._resolve_admin_permissions(result, progress_callback)
         else:
+            role = self.worker
             result = await self.worker.execute(chat_result.task)
+        result = await self._resolve_permissions(role, result, progress_callback)
         self.chat.record_worker_result(result.response)
         if result.status != "needs_input":
             self.pending_execution_result = result.response
         return result
 
     async def continue_task(self, user_message: str, progress_callback=None):
-        if self.admin.awaiting_user_input:
-            if self.admin.pending_permission is not None:
-                if self.admin_permission_mode == "auto":
-                    result = await self.admin.continue_with_user_input(
-                        "อนุญาต", progress_callback=progress_callback
-                    )
-                else:
-                    question = self.admin._permission_question(
-                        self.admin.pending_permission
-                    )
-                    try:
-                        decision = await self.confirmation.classify(
-                            question, user_message
-                        )
-                    except Exception as error:
-                        print(f"CONFIRMATION ERROR: {error}")
-                        decision = "unclear"
-                    if decision == "unclear":
-                        result = AdminResult(
-                            status="needs_input",
-                            response="กรุณาตอบว่าอนุญาตหรือไม่อนุญาตครับ",
-                        )
-                    else:
-                        result = await self.admin.continue_with_user_input(
-                            "อนุญาต" if decision == "allow" else "ไม่อนุญาต",
-                            progress_callback=progress_callback,
-                        )
-            else:
-                result = await self.admin.continue_with_user_input(
-                    user_message, progress_callback=progress_callback
-                )
-            result = await self._resolve_admin_permissions(result, progress_callback)
+        role = self.admin if self.admin.awaiting_user_input else self.worker
+        if role.pending_permission is None:
+            result = await role.continue_with_user_input(
+                user_message, progress_callback=progress_callback
+            )
+        elif self.permission_mode == "auto":
+            result = await role.answer_permission(True, progress_callback=progress_callback)
         else:
-            result = await self.worker.continue_with_user_input(user_message)
+            try:
+                decision = await self.confirmation.classify(
+                    role.permission_question, user_message
+                )
+            except Exception as error:
+                print(f"CONFIRMATION ERROR: {error}")
+                decision = "unclear"
+            if decision == "unclear":
+                result_type = AdminResult if role is self.admin else WorkerResult
+                result = result_type(
+                    status="needs_input",
+                    response="กรุณาตอบว่าอนุญาตหรือไม่อนุญาตครับ",
+                )
+            else:
+                result = await role.answer_permission(
+                    decision == "allow", progress_callback=progress_callback
+                )
+        result = await self._resolve_permissions(role, result, progress_callback)
         self.chat.record_worker_continuation(user_message, result.response)
         if result.status != "needs_input":
             self.pending_execution_result = result.response
         return result
 
-    async def _resolve_admin_permissions(self, result, progress_callback=None):
+    async def _resolve_permissions(self, role, result, progress_callback=None):
         while (
-            self.admin_permission_mode == "auto"
+            self.permission_mode == "auto"
             and result.status == "needs_input"
-            and self.admin.pending_permission is not None
+            and role.pending_permission is not None
         ):
-            result = await self.admin.continue_with_user_input(
-                "อนุญาต", progress_callback=progress_callback
-            )
+            result = await role.answer_permission(True, progress_callback=progress_callback)
         return result
+
+    def collect_task_outputs(self, destination) -> list:
+        """Files the finished worker task made, moved into ``destination``."""
+        return self.worker.collect_outputs(destination)
 
     async def rotate_chat_if_ready(self) -> bool:
         if self.awaiting_user_input:
@@ -194,7 +199,7 @@ class Controller:
         async with self.lock:
             await asyncio.gather(self.worker.abort(), self.admin.abort())
             await self.chat.reset()
-            self.admin_permission_mode = "ask"
+            self.permission_mode = "ask"
             self.pending_execution_result = None
 
     async def cancel_pending_task(self) -> None:

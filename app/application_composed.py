@@ -113,7 +113,7 @@ class DesktopApplication(
         self.window.chat.folder_requested.connect(self.select_folder)
         self.window.chat.folder_cleared.connect(self.clear_folder)
         self.window.chat.permission_mode_changed.connect(
-            self.controller.set_admin_permission_mode
+            self.controller.set_permission_mode
         )
         self.window.chat.ai_provider_changed.connect(self._on_ai_provider_changed)
         self.window.chat.model_effort_changed.connect(self._on_model_effort_changed)

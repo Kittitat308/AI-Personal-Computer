@@ -35,6 +35,7 @@ class ChatPage(QWidget):
         super().__init__()
         self._busy = False
         self._model_locked = False
+        self._folder_path: str | None = None
         self._provider: str | None = None
         self._ai_settings = None
         self._manual_recording = False
@@ -160,8 +161,12 @@ class ChatPage(QWidget):
         self.folder_button.setIconSize(QSize(24, 24))
         self.folder_button.setMinimumWidth(176)
         self.folder_button.clicked.connect(self.folder_requested)
+        # Enabled once an AI that works with files is loaded.
+        self.folder_button.setEnabled(False)
         self.permission_mode_button = PermissionModeButton("ขออนุมัติ")
-        self.permission_mode_button.setToolTip("เลือกรูปแบบการอนุมัติคำสั่งของ Admin")
+        self.permission_mode_button.setToolTip(
+            "เลือกรูปแบบการอนุมัติคำสั่งของ Admin และการแก้ไขไฟล์หรือรันคำสั่งของ Worker"
+        )
         self.permission_mode_button.clicked.connect(
             self._show_permission_mode_menu
         )
@@ -589,12 +594,12 @@ class ChatPage(QWidget):
                 name, Qt.ElideMiddle, 180
             )
             self.folder_button.setText("\u00a0\u00a0" + display_name)
-            self.folder_button.setToolTip(path)
             self.remove_folder_button.setVisible(True)
         else:
             self.folder_button.setText("\u00a0\u00a0เลือกโฟลเดอร์")
-            self.folder_button.setToolTip("")
             self.remove_folder_button.setVisible(False)
+        self._folder_path = path
+        self._apply_model_controls()
 
     def set_permission_mode(self, mode: str, emit: bool = False) -> None:
         if mode not in {"ask", "auto"}:
@@ -681,6 +686,16 @@ class ChatPage(QWidget):
         changeable = not self._busy and not self._model_locked
         self.ai_provider_button.setEnabled(changeable)
         self.model_button.setEnabled(changeable and bool(self._model_choices()))
+        # Only a provider with file tools can work in a selected folder.
+        info = PROVIDERS.get(self._provider or "")
+        works_with_files = info is not None and info.claude_skills
+        self.folder_button.setEnabled(changeable and works_with_files)
+        self.remove_folder_button.setEnabled(not self._busy)
+        self.folder_button.setToolTip(
+            (self._folder_path or "")
+            if works_with_files
+            else "ใช้ได้เฉพาะเมื่อเลือก AI เป็น Claude"
+        )
 
     def _refresh_model_buttons(self) -> None:
         provider = self._provider

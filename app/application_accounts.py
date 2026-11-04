@@ -500,7 +500,7 @@ class AccountMixin:
         self.window.chat.set_nickname(nickname)
         self.window.chat.set_voice_mode("normal")
         self.window.chat.set_permission_mode("ask")
-        self.controller.set_admin_permission_mode("ask")
+        self.controller.set_permission_mode("ask")
         self.window.show_chat()
         asyncio.create_task(self._enter_chat_session())
 

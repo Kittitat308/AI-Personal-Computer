@@ -211,7 +211,7 @@ class QwenProvider(AIProvider):
 
     async def execute_worker(
         self, *, task, system_prompt, skill_instructions, definitions, registry,
-        allowed_directories: list[Path],
+        workspace,
     ):
         tools = await registry.list_tools(definitions)
         call_tool = registry.call_tool

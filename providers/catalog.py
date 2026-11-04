@@ -16,7 +16,8 @@ class ProviderInfo:
     models: tuple[tuple[str, str], ...] = ()
     efforts: tuple[tuple[str, str], ...] = ()
     uses_api_key: bool = False
-    # Claude CLI built-in tools make the skills in claude_skills/ available.
+    # Claude CLI built-in tools make the skills in claude_skills/ available,
+    # including working with files in the folder the user selects.
     claude_skills: bool = False
 
 

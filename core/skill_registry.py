@@ -31,7 +31,6 @@ class SkillDefinition:
     directory: Path
     requires: tuple[str, ...] = ()
     builtin_tools: tuple[str, ...] = ()
-    working_directory: Path | None = None
     free_ports: tuple[str, ...] = ()
     user_env: dict[str, str] = field(default_factory=dict)
     login_required: bool = False
@@ -53,16 +52,12 @@ def load_definitions(root: Path) -> dict[str, SkillDefinition]:
     definitions: dict[str, SkillDefinition] = {}
     for manifest in sorted(root.glob("*/skill.json")):
         data = json.loads(manifest.read_text(encoding="utf-8"))
-        working_directory = data.get("working_directory")
         definitions[manifest.parent.name] = SkillDefinition(
             skill_id=manifest.parent.name,
             description=data["description"],
             directory=manifest.parent,
             requires=tuple(data.get("requires", ())),
             builtin_tools=tuple(data.get("builtin_tools", ())),
-            working_directory=(
-                PROJECT_ROOT / working_directory if working_directory else None
-            ),
             free_ports=tuple(data.get("free_ports", ())),
             user_env=dict(data.get("user_env", {})),
             login_required=bool(data.get("login_required", False)),

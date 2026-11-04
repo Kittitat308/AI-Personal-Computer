@@ -1,12 +1,15 @@
-import asyncio
-import contextlib
 import os
 import platform
 import shutil
 from pathlib import Path
 from typing import Callable
 
-from core.claude_cli import ClaudeResponse, ClaudeSession, stream_json_arguments
+from core.claude_cli import (
+    ClaudeResponse,
+    ClaudeSession,
+    InteractiveSession,
+    stream_json_arguments,
+)
 from core.config import ADMIN_EFFORT, ADMIN_MODEL, PROMPTS_DIR
 from core.schemas import AdminResult, TaskRequest
 
@@ -25,17 +28,23 @@ class AdminAI:
         self.model = model
         self.effort = effort
         self.system_prompt = (PROMPTS_DIR / "admin.md").read_text(encoding="utf-8")
-        self.active_session: ClaudeSession | None = None
-        self.running_session: ClaudeSession | None = None
-        self.turn_task: asyncio.Task | None = None
-        self.permission_queue: asyncio.Queue = asyncio.Queue()
-        self.pending_permission: dict | None = None
+        self.session: InteractiveSession | None = None
         self.progress_callback: ProgressCallback | None = None
         self.last_progress = ""
 
     @property
     def awaiting_user_input(self) -> bool:
-        return self.active_session is not None
+        return self.session is not None
+
+    @property
+    def pending_permission(self) -> dict | None:
+        return None if self.session is None else self.session.pending_permission
+
+    @property
+    def permission_question(self) -> str:
+        if self.session is None:
+            raise RuntimeError("Admin is not waiting for a permission decision")
+        return self.session.question
 
     def _create_session(self) -> ClaudeSession:
         arguments = stream_json_arguments(
@@ -115,109 +124,61 @@ class AdminAI:
         task: TaskRequest,
         progress_callback: ProgressCallback | None = None,
     ) -> AdminResult:
-        if self.active_session is not None or self.turn_task is not None:
+        if self.session is not None:
             raise RuntimeError("Admin is already handling a task")
 
         task = TaskRequest.model_validate(task)
         if task.skill_ids != ["admin"]:
             raise ValueError("Admin tasks must use only the admin capability")
 
-        session = self._create_session()
-        self.permission_queue = asyncio.Queue()
-        self.active_session = session
-        self.running_session = session
+        self.session = InteractiveSession(
+            self._create_session(), on_assistant_text=self._on_assistant_text
+        )
         self.progress_callback = progress_callback
         self.last_progress = ""
-        self._start_turn(self._task_prompt(task))
-        return await self._await_turn_or_permission()
+        self.session.start_turn(self._task_prompt(task))
+        return await self._wait()
 
     async def continue_with_user_input(
         self,
         user_message: str,
         progress_callback: ProgressCallback | None = None,
     ) -> AdminResult:
-        if self.active_session is None:
-            raise RuntimeError("Admin is not waiting for user input")
-
+        if self.session is None or self.session.pending_permission is not None:
+            raise RuntimeError("Admin is not waiting for an answer")
         if progress_callback is not None:
             self.progress_callback = progress_callback
-
-        if self.pending_permission is not None:
-            decision = self._confirmation_decision(user_message)
-            if decision is None:
-                return AdminResult(
-                    status="needs_input",
-                    response="กรุณาตอบว่ายืนยันหรือไม่อนุญาตครับ",
-                )
-
-            permission = self.pending_permission
-            self.pending_permission = None
-            await self.active_session.respond_to_permission(
-                permission["request_id"],
-                permission["request"].get("input", {}),
-                decision,
-            )
-            return await self._await_turn_or_permission()
-
-        self.running_session = self.active_session
-        self._start_turn(
+        self.session.start_turn(
             "ผู้ใช้ตอบคำถามของคุณว่า:\n"
             + user_message.strip()
             + "\n\nให้ทำงาน Admin เดิมต่อจนเสร็จ"
         )
-        return await self._await_turn_or_permission()
+        return await self._wait()
 
-    def _start_turn(self, prompt: str) -> None:
-        if self.active_session is None:
-            raise RuntimeError("Admin session is not active")
-        self.turn_task = asyncio.create_task(
-            self.active_session.generate(
-                prompt,
-                on_assistant_text=self._on_assistant_text,
-                on_permission_request=self._on_permission_request,
-            )
-        )
+    async def answer_permission(
+        self,
+        allow: bool,
+        progress_callback: ProgressCallback | None = None,
+    ) -> AdminResult:
+        if self.session is None:
+            raise RuntimeError("Admin is not waiting for a permission decision")
+        if progress_callback is not None:
+            self.progress_callback = progress_callback
+        await self.session.answer_permission(allow)
+        return await self._wait()
 
-    async def _await_turn_or_permission(self) -> AdminResult:
-        if self.turn_task is None:
-            raise RuntimeError("Admin turn is not running")
-
-        permission_waiter = asyncio.create_task(self.permission_queue.get())
+    async def _wait(self) -> AdminResult:
         try:
-            done, _ = await asyncio.wait(
-                {self.turn_task, permission_waiter},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            if self.turn_task in done:
-                permission_waiter.cancel()
-                response = await self.turn_task
-                self.turn_task = None
-                self.running_session = None
-                result = self._parse_result(response)
-
-                if result.status != "needs_input":
-                    await self._finish_session()
-
-                return result
-
-            self.pending_permission = permission_waiter.result()
-            return AdminResult(
-                status="needs_input",
-                response=self._permission_question(self.pending_permission),
-            )
-        except asyncio.CancelledError:
+            response = await self.session.wait()
+            if response is None:
+                return AdminResult(status="needs_input", response=self.session.question)
+            result = self._parse_result(response)
+        except BaseException:
             await self.abort()
             raise
-        except Exception:
-            await self.abort()
-            raise
-        finally:
-            if not permission_waiter.done():
-                permission_waiter.cancel()
-
-    def _on_permission_request(self, event: dict) -> None:
-        self.permission_queue.put_nowait(event)
+        if result.status != "needs_input":
+            await self._finish_session()
+        return result
 
     def _on_assistant_text(self, text: str) -> None:
         marker = "[progress] "
@@ -235,52 +196,6 @@ class AdminAI:
         if self.progress_callback is not None:
             self.progress_callback(message)
 
-    def _permission_question(self, event: dict) -> str:
-        request = event.get("request", {})
-        description = str(request.get("description") or "").strip()
-        if description:
-            description = description.rstrip(".。 ")
-            return f"{description} ยืนยันให้ดำเนินการไหมครับ"
-
-        tool_name = request.get("tool_name", "คำสั่งระบบ")
-        return f"Admin ต้องใช้ {tool_name} เพื่อทำงานต่อ ยืนยันไหมครับ"
-
-    @staticmethod
-    def _confirmation_decision(message: str) -> bool | None:
-        normalized = " ".join(message.casefold().strip().split())
-        for suffix in ("ครับ", "ค่ะ", "คะ", "คับ"):
-            if normalized.endswith(suffix):
-                normalized = normalized[: -len(suffix)].strip()
-                break
-        deny_phrases = (
-            "ไม่",
-            "ไม่อนุญาต",
-            "ไม่ยืนยัน",
-            "ยกเลิก",
-            "หยุด",
-            "no",
-            "deny",
-            "cancel",
-        )
-        allow_phrases = (
-            "ยืนยัน",
-            "อนุญาต",
-            "ตกลง",
-            "ได้",
-            "ทำเลย",
-            "ใช่",
-            "โอเค",
-            "ok",
-            "yes",
-            "allow",
-        )
-
-        if normalized in deny_phrases or normalized.startswith("ไม่"):
-            return False
-        if normalized in allow_phrases:
-            return True
-        return None
-
     @staticmethod
     def _parse_result(response: ClaudeResponse) -> AdminResult:
         if response.structured_output is not None:
@@ -291,28 +206,13 @@ class AdminAI:
             raise RuntimeError(f"Admin returned invalid structured output: {error}") from error
 
     async def _finish_session(self) -> None:
-        session = self.active_session
-        self.active_session = None
-        self.running_session = None
-        self.turn_task = None
-        self.pending_permission = None
+        session, self.session = self.session, None
         self.progress_callback = None
         if session is not None:
             await session.close()
 
     async def abort(self) -> None:
-        turn_task = self.turn_task
-        session = self.active_session or self.running_session
-        self.active_session = None
-        self.running_session = None
-        self.turn_task = None
-        self.pending_permission = None
+        session, self.session = self.session, None
         self.progress_callback = None
-
-        if turn_task is not None and not turn_task.done():
-            turn_task.cancel()
         if session is not None:
             await session.abort()
-        if turn_task is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await turn_task

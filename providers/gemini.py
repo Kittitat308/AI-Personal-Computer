@@ -1,6 +1,5 @@
 import asyncio
 import json
-from pathlib import Path
 from typing import Any
 
 from core.schemas import WorkerResult
@@ -54,7 +53,7 @@ class GeminiProvider(AIProvider):
 
     async def execute_worker(
         self, *, task, system_prompt, skill_instructions, definitions, registry,
-        allowed_directories: list[Path],
+        workspace,
     ):
         from google.genai import types
 

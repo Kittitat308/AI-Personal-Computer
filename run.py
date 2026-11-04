@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+from pathlib import Path
 
 from core.controller import Controller
 import core.config  # noqa: F401  (loads .env)
@@ -8,6 +9,8 @@ from providers.catalog import DEFAULT_PROVIDER
 from app.stt_adapter import GUISTTService
 from speech.recorder import ManualRecorder
 from speech.tts import AudioQueue
+
+OUTPUT_DIRECTORY = Path.home() / "Downloads"
 
 
 async def main() -> None:
@@ -90,6 +93,10 @@ async def main() -> None:
                     if worker_result is not None:
                         print(f"\nWORKER:\n{worker_result.response}")
                         audio_queue.enqueue(worker_result.response)
+
+                # Files a finished task made are delivered to Downloads.
+                for path in controller.collect_task_outputs(OUTPUT_DIRECTORY):
+                    print(f"ไฟล์: {path}")
 
                 rotated = await controller.rotate_chat_if_ready()
 

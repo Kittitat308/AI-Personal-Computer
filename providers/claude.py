@@ -1,13 +1,23 @@
-import asyncio
 import json
 from pathlib import Path
 
 from core.attachments import build_user_content
-from core.claude_cli import ISOLATED_ARGUMENTS, ClaudeSession, stream_json_arguments
+from core.claude_cli import (
+    HOST_PERMISSION_PROMPTS,
+    ISOLATED_ARGUMENTS,
+    ISOLATED_SETTINGS,
+    ClaudeSession,
+    InteractiveSession,
+    stream_json_arguments,
+)
 from core.config import PROJECT_ROOT
-from core.schemas import ChatResult, WorkerResult
-from providers.base import AIProvider
+from core.schemas import WorkerResult
+from providers.base import AIProvider, Workspace
 from providers.catalog import DEFAULT_EFFORT, PROVIDERS
+
+
+# Tools that never change anything, so they run without asking.
+READ_ONLY_TOOLS = {"Read", "Glob", "Grep", "WebSearch", "WebFetch"}
 
 
 class ClaudeProvider(AIProvider):
@@ -18,8 +28,8 @@ class ClaudeProvider(AIProvider):
         if effort not in {value for _, value in PROVIDERS[self.name].efforts}:
             raise ValueError("Claude effort ไม่ถูกต้อง")
         self.chat_session: ClaudeSession | None = None
-        self.active_worker_session: ClaudeSession | None = None
-        self.running_worker_session: ClaudeSession | None = None
+        self.worker_session: InteractiveSession | None = None
+        self.worker_waiting = False
 
     def _base_arguments(self, system_prompt: str, schema: dict) -> list[str]:
         return stream_json_arguments(
@@ -64,7 +74,7 @@ class ClaudeProvider(AIProvider):
         definitions,
         registry,
         system_prompt: str,
-        allowed_directories: list[Path],
+        workspace: Workspace,
     ) -> ClaudeSession:
         mcp_tools = [
             f"mcp__{definition.skill_id}"
@@ -78,55 +88,59 @@ class ClaudeProvider(AIProvider):
                 for tool_name in definition.builtin_tools
             )
         )
+        # Like Claude Code: reading is free, while changes follow the
+        # permission mode and ask the user through the host when needed.
+        allowed_tools = [
+            *mcp_tools,
+            *(tool for tool in builtin_tools if tool in READ_ONLY_TOOLS),
+        ]
         arguments = self._base_arguments(
             system_prompt, WorkerResult.model_json_schema()
         )
         arguments.extend(
             [
-                "--tools", ",".join(builtin_tools), "--allowedTools",
-                ",".join([*mcp_tools, *builtin_tools]), "--mcp-config",
+                "--tools", ",".join(builtin_tools),
+                "--allowedTools", ",".join(allowed_tools),
+                "--mcp-config",
                 json.dumps(
                     {"mcpServers": registry.mcp_servers(definitions)},
                     ensure_ascii=False,
                 ),
-                *ISOLATED_ARGUMENTS,
+                *ISOLATED_SETTINGS,
+                # The user's own folder asks before every change (Claude
+                # Code's default mode); a temporary output folder accepts
+                # edits inside it and still asks for anything else.
+                "--permission-mode",
+                "manual" if workspace.user_folder else "acceptEdits",
+                *HOST_PERMISSION_PROMPTS,
             ]
         )
-        for directory in allowed_directories:
+        for directory in workspace.extra_directories:
             arguments.extend(["--add-dir", str(directory)])
-
-        working_directories = {
-            definition.working_directory
-            for definition in definitions
-            if definition.working_directory is not None
-        }
-        if len(working_directories) > 1:
-            raise RuntimeError("Selected CLI skills require different working directories")
-        working_directory = next(iter(working_directories), PROJECT_ROOT)
-        working_directory.mkdir(parents=True, exist_ok=True)
-        return ClaudeSession(arguments, working_directory)
+        return ClaudeSession(arguments, workspace.directory)
 
     @staticmethod
-    def _task_prompt(task, definitions, skill_instructions: str) -> str:
+    def _task_prompt(task, skill_instructions: str, workspace: Workspace) -> str:
         prompt = (
             "Delegated task:\n"
             + json.dumps(task.model_dump(), ensure_ascii=False, indent=2)
         )
         if skill_instructions:
             prompt += "\n\nSelected skill instructions:\n\n" + skill_instructions
-        working_directories = {
-            definition.working_directory.resolve()
-            for definition in definitions
-            if definition.working_directory is not None
-        }
-        if len(working_directories) == 1:
-            directory = next(iter(working_directories))
+        if workspace.user_folder:
             prompt += (
-                "\n\nFile workspace boundary:\n"
-                f"- Use {directory} as the working directory.\n"
-                "- Create every generated or temporary file inside this directory.\n"
-                "- Do not create files in the project root or another directory.\n"
-                "- Keep every output in the working directory."
+                "\n\nWorking folder:\n"
+                f"- The user selected {workspace.directory} as the folder to work in.\n"
+                "- Work on the files in this folder and save new files here.\n"
+                "- Change or delete only what the task requires."
+            )
+        else:
+            prompt += (
+                "\n\nOutput folder:\n"
+                f"- Save every file made for the user in {workspace.directory}.\n"
+                "- Every file left in this folder is sent to the user as an "
+                "attachment, so remove scratch files before finishing.\n"
+                "- Files saved anywhere else are not delivered."
             )
         return prompt
 
@@ -138,69 +152,72 @@ class ClaudeProvider(AIProvider):
 
     async def execute_worker(
         self, *, task, system_prompt, skill_instructions, definitions, registry,
-        allowed_directories: list[Path],
+        workspace: Workspace,
     ):
-        if self.active_worker_session is not None:
-            raise RuntimeError("Worker is already waiting for user input")
+        if self.worker_session is not None:
+            raise RuntimeError("Worker is already handling a task")
         await registry.start_runtimes(definitions)
-        session = self._worker_session(
-            definitions, registry, system_prompt, allowed_directories
+        self.worker_session = InteractiveSession(
+            self._worker_session(definitions, registry, system_prompt, workspace)
         )
-        self.running_worker_session = session
+        self.worker_session.start_turn(
+            self._task_prompt(task, skill_instructions, workspace)
+        )
+        return await self._wait_worker()
+
+    async def _wait_worker(self) -> dict:
+        session = self.worker_session
         try:
-            response = await session.generate(
-                self._task_prompt(task, definitions, skill_instructions)
-            )
+            response = await session.wait()
+            if response is None:
+                self.worker_waiting = True
+                return {"status": "needs_input", "response": session.question}
             result = self._parse_worker(response)
-        except asyncio.CancelledError:
-            await session.abort()
+        except BaseException:
+            await self.abort_worker()
             raise
-        except Exception:
-            await session.close()
-            raise
-        finally:
-            self.running_worker_session = None
         if result.get("status") == "needs_input":
-            self.active_worker_session = session
+            self.worker_waiting = True
         else:
+            self.worker_session = None
             await session.close()
         return result
 
     @property
     def worker_awaiting_input(self) -> bool:
-        return self.active_worker_session is not None
+        return self.worker_waiting
+
+    @property
+    def worker_pending_permission(self) -> dict | None:
+        if self.worker_session is None:
+            return None
+        return self.worker_session.pending_permission
+
+    @property
+    def worker_permission_question(self) -> str:
+        if self.worker_session is None:
+            raise RuntimeError("Worker is not waiting for a permission decision")
+        return self.worker_session.question
 
     async def continue_worker(self, user_message: str) -> dict:
-        session = self.active_worker_session
-        if session is None:
-            raise RuntimeError("Worker is not waiting for user input")
-        self.active_worker_session = None
-        self.running_worker_session = session
-        try:
-            result = self._parse_worker(await session.generate(user_message))
-        except asyncio.CancelledError:
-            await session.abort()
-            raise
-        except Exception:
-            await session.close()
-            raise
-        finally:
-            self.running_worker_session = None
-        if result.get("status") == "needs_input":
-            self.active_worker_session = session
-        else:
-            await session.close()
-        return result
+        if not self.worker_waiting or self.worker_pending_permission is not None:
+            raise RuntimeError("Worker is not waiting for an answer")
+        self.worker_waiting = False
+        self.worker_session.start_turn(user_message)
+        return await self._wait_worker()
+
+    async def answer_worker_permission(self, allow: bool) -> dict:
+        if self.worker_pending_permission is None:
+            raise RuntimeError("Worker is not waiting for a permission decision")
+        self.worker_waiting = False
+        await self.worker_session.answer_permission(allow)
+        return await self._wait_worker()
 
     async def abort_worker(self) -> None:
-        sessions = {
-            session
-            for session in (self.active_worker_session, self.running_worker_session)
-            if session is not None
-        }
-        self.active_worker_session = None
-        self.running_worker_session = None
-        await asyncio.gather(*(session.abort() for session in sessions))
+        session, self.worker_session = self.worker_session, None
+        self.worker_waiting = False
+        if session is not None:
+            await session.abort()
 
     async def reset_chat(self) -> None:
         if self.chat_session is not None:

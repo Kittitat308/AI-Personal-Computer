@@ -1,9 +1,26 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from core.attachments import MAX_EXTRACTED_CHARACTERS, extract_file_text
 from providers.catalog import DEFAULT_EFFORT
+
+
+@dataclass(frozen=True)
+class Workspace:
+    """Where a worker task runs.
+
+    ``directory`` is the working directory. When ``user_folder`` is True it is
+    the folder the user selected and the worker works on it in place;
+    otherwise it is a temporary folder whose files are delivered to the user
+    as attachments. ``extra_directories`` are also readable, such as the
+    folder holding the user's attachments.
+    """
+
+    directory: Path
+    user_folder: bool
+    extra_directories: tuple[Path, ...] = ()
 
 
 class AIProvider(ABC):
@@ -34,7 +51,7 @@ class AIProvider(ABC):
         skill_instructions: str,
         definitions: list[Any],
         registry: Any,
-        allowed_directories: list[Path],
+        workspace: Workspace,
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -63,6 +80,17 @@ class AIProvider(ABC):
 
     async def continue_worker(self, user_message: str) -> dict[str, Any]:
         raise RuntimeError("Provider นี้ไม่มี Worker ที่กำลังรอข้อมูล")
+
+    @property
+    def worker_pending_permission(self) -> dict | None:
+        return None
+
+    @property
+    def worker_permission_question(self) -> str:
+        raise RuntimeError("Worker is not waiting for a permission decision")
+
+    async def answer_worker_permission(self, allow: bool) -> dict[str, Any]:
+        raise RuntimeError("Worker is not waiting for a permission decision")
 
     async def abort_worker(self) -> None:
         return None

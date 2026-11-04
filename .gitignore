@@ -6,7 +6,6 @@ __pycache__/
 *.py[cod]
 browser_data/*
 !browser_data/.gitkeep
-documents/*
 speech/stt/whisper/*.bin
 speech/stt/whisper/*.exe
 speech/stt/whisper/*.dll
