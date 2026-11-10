@@ -11,6 +11,7 @@ speech/stt/whisper/*.exe
 speech/stt/whisper/*.dll
 speech/stt/whisper/whisper-server
 speech/stt/zipformer/*.onnx
+speech/tts/model/*.onnx
 models/*.gguf
 data/*
 !data/.gitkeep

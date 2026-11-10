@@ -353,7 +353,7 @@ class VoiceDeviceMixin:
                 if not available:
                     raise RuntimeError("ไม่พบลำโพงหรือหูฟัง")
                 self.state.speaker_available = True
-                dialog.update_message("กำลังเชื่อมต่อระบบเสียงพูด...")
+                dialog.update_message("กำลังโหลดโมเดลเสียงพูด...")
                 service_errors = await self._load_tts_service()
                 if service_errors:
                     raise RuntimeError("\n".join(service_errors))

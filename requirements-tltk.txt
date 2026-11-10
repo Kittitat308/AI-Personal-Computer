@@ -1,0 +1,4 @@
+# Install with: pip install --no-deps -r requirements-tltk.txt
+# (its scikit-learn~=1.2 pin conflicts with numpy 2; the newer scikit-learn from
+# requirements-gui.txt works with it)
+tltk==1.11

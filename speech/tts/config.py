@@ -7,27 +7,17 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env")
 
-AZURE_SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY", "").strip()
-AZURE_SPEECH_REGION = os.getenv("AZURE_SPEECH_REGION", "").strip()
-AZURE_SPEECH_VOICE = os.getenv(
-    "AZURE_SPEECH_VOICE",
-    "th-TH-NiwatNeural",
-).strip()
-AZURE_SPEECH_RATE = os.getenv("AZURE_SPEECH_RATE", "+15%").strip()
+MODEL_DIR = Path(__file__).resolve().parent / "model"
+GRAPH_NAMES = ("prosody", "curves", "decoder")
 
-REQUEST_TIMEOUT_SECONDS = 8.0
-OUTPUT_FORMAT = "riff-24khz-16bit-mono-pcm"
+# Voice names are the voice-*.bin files in model/ (for example m_young_clear).
+TTS_VOICE = os.getenv("TTS_VOICE", "").strip() or "m_young_clear"
+# Multiplies the speaking speed of the voice (1.0 keeps the voice's own pace).
+TTS_SPEED = float(os.getenv("TTS_SPEED", "").strip() or 1.0)
+TTS_THREADS = int(os.getenv("TTS_THREADS", "").strip() or min(8, os.cpu_count() or 1))
 
-
-def validate_tts_settings() -> None:
-    missing = []
-
-    if not AZURE_SPEECH_KEY:
-        missing.append("AZURE_SPEECH_KEY")
-    if not AZURE_SPEECH_REGION:
-        missing.append("AZURE_SPEECH_REGION")
-
-    if missing:
-        raise RuntimeError(
-            "ยังไม่ได้ตั้งค่า Azure TTS: " + ", ".join(missing)
-        )
+SAMPLE_RATE = 24_000
+# Long replies are spoken in pieces so the first piece plays while the next one
+# is still being generated.
+MAX_CHUNK_CHARACTERS = 80
+MIN_CHUNK_CHARACTERS = 20
