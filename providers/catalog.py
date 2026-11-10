@@ -4,6 +4,7 @@ The app, database and core read provider names, default models, model choices
 and efforts from here instead of repeating them.
 """
 
+import shutil
 from dataclasses import dataclass
 
 
@@ -16,6 +17,8 @@ class ProviderInfo:
     models: tuple[tuple[str, str], ...] = ()
     efforts: tuple[tuple[str, str], ...] = ()
     uses_api_key: bool = False
+    # Command-line program the provider needs; without it the provider is not offered.
+    executable: str = ""
     # Claude CLI built-in tools make the skills in claude_skills/ available,
     # including working with files in the folder the user selects.
     claude_skills: bool = False
@@ -59,12 +62,23 @@ PROVIDERS = {
                 ("Haiku 5.5", "haiku"),
             ),
             efforts=CLAUDE_EFFORTS,
+            executable="claude",
             claude_skills=True,
         ),
     )
 }
 DEFAULT_PROVIDER = "claude"
 ALL_EFFORTS = tuple(dict.fromkeys(value for _, value in CLAUDE_EFFORTS))
+
+
+def cli_available(executable: str) -> bool:
+    """Whether a command-line program can be found on this computer."""
+    return shutil.which(executable) is not None
+
+
+def provider_available(name: str) -> bool:
+    info = PROVIDERS.get(name.strip().casefold())
+    return info is not None and (not info.executable or cli_available(info.executable))
 
 
 def provider_info(name: str) -> ProviderInfo:

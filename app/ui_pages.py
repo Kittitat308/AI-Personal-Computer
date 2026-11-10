@@ -9,7 +9,7 @@ from app.ui_dialogs import (
 )
 
 
-from providers.catalog import PROVIDERS
+from providers.catalog import PROVIDERS, provider_available
 
 
 def _label_for(choices, value: str) -> str:
@@ -629,6 +629,8 @@ class ChatPage(QWidget):
     def _show_provider_menu(self) -> None:
         menu = QMenu(self)
         for provider, info in PROVIDERS.items():
+            if not provider_available(provider):
+                continue
             action = menu.addAction(info.label)
             action.setIcon(self._choice_icon(provider == self._provider))
             action.triggered.connect(

@@ -13,7 +13,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from core.config import CLAUDE_SKILLS_DIR, PROJECT_ROOT, SKILLS_DIR
-from providers.catalog import provider_info
+from providers.catalog import cli_available, provider_info
 
 
 @dataclass(frozen=True)
@@ -228,7 +228,9 @@ class SkillRegistry:
         }
         if provider_info(provider_name).claude_skills:
             definitions.update(self.claude_definitions)
-        definitions["admin"] = self.central_definitions["admin"]
+        # Admin runs on Claude CLI, so it is only offered when that is installed.
+        if cli_available("claude"):
+            definitions["admin"] = self.central_definitions["admin"]
         self.definitions = definitions
 
     async def set_active_user(self, user_id: int | None) -> None:

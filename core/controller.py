@@ -7,7 +7,12 @@ from core.schemas import AdminResult, ChatResult, WorkerResult
 from core.skill_registry import SkillRegistry
 from core.worker import WorkerAI
 from providers import create_provider
-from providers.catalog import DEFAULT_EFFORT, DEFAULT_PROVIDER, provider_info
+from providers.catalog import (
+    DEFAULT_EFFORT,
+    DEFAULT_PROVIDER,
+    provider_available,
+    provider_info,
+)
 
 
 class Controller:
@@ -60,6 +65,8 @@ class Controller:
         api_key: str = "",
     ) -> None:
         info = provider_info(name)
+        if not provider_available(info.name):
+            raise RuntimeError(f"ไม่พบโปรแกรม {info.executable} ในเครื่อง จึงใช้ {info.label} ไม่ได้")
         model = model.strip() or info.default_model
         effort = effort.strip().casefold() or DEFAULT_EFFORT
         api_key = api_key.strip() if info.uses_api_key else ""
@@ -198,6 +205,10 @@ class Controller:
     async def reset_conversation(self) -> None:
         async with self.lock:
             await asyncio.gather(self.worker.abort(), self.admin.abort())
+            # Look again at what is installed, so a program installed since the
+            # last session shows up in what Chat can choose from.
+            self.registry.set_provider(self.provider.name)
+            self.chat.skill_catalog = self.registry.catalog()
             await self.chat.reset()
             self.permission_mode = "ask"
             self.pending_execution_result = None

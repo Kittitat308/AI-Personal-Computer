@@ -1,5 +1,5 @@
 from app.application_support import *
-from providers.catalog import PROVIDERS, provider_info
+from providers.catalog import PROVIDERS, provider_available, provider_info
 
 
 class ChatMixin:
@@ -26,26 +26,34 @@ class ChatMixin:
                     user_id,
                     "gemini",
                 )
-                model = self._model_for_provider(ai_settings, ai_settings.provider)
-                try:
-                    await self.controller.configure_provider(
-                        ai_settings.provider,
-                        model,
-                        ai_settings.model_effort,
-                        api_key,
-                    )
-                except Exception:
+                if not provider_available(ai_settings.provider):
+                    # The saved AI is not installed on this computer. That is not
+                    # an error: nothing is selected until the user picks another.
                     self.ai_model_unselected = True
                     self.window.chat.set_ai_unselected()
                     self._load_ai_settings_page(ai_settings, api_key)
-                    raise
-                self.ai_model_unselected = False
-                self.window.chat.set_ai_models(
-                    ai_settings,
-                    ai_settings.provider,
-                )
-                self._load_ai_settings_page(ai_settings, api_key)
-                await self.controller.reset_conversation()
+                    await self.controller.reset_conversation()
+                else:
+                    model = self._model_for_provider(ai_settings, ai_settings.provider)
+                    try:
+                        await self.controller.configure_provider(
+                            ai_settings.provider,
+                            model,
+                            ai_settings.model_effort,
+                            api_key,
+                        )
+                    except Exception:
+                        self.ai_model_unselected = True
+                        self.window.chat.set_ai_unselected()
+                        self._load_ai_settings_page(ai_settings, api_key)
+                        raise
+                    self.ai_model_unselected = False
+                    self.window.chat.set_ai_models(
+                        ai_settings,
+                        ai_settings.provider,
+                    )
+                    self._load_ai_settings_page(ai_settings, api_key)
+                    await self.controller.reset_conversation()
             except Exception as error:
                 errors.append(f"เริ่มเซสชัน AI ไม่สำเร็จ: {error}")
 
